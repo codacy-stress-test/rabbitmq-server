@@ -111,7 +111,10 @@
           consumer_timeout,
           authz_context,
           %% defines how ofter gc will be executed
-          writer_gc_threshold
+          writer_gc_threshold,
+          %% true with AMQP 1.0 to include the publishing sequence
+          %% in the return callback, false otherwise
+          extended_return_callback
          }).
 
 -record(pending_ack, {
@@ -232,6 +235,12 @@
 -type channel() :: #ch{}.
 
 %%----------------------------------------------------------------------------
+
+-rabbit_deprecated_feature(
+   {global_qos,
+    #{deprecation_phase => permitted_by_default,
+      doc_url => "https://blog.rabbitmq.com/posts/2021/08/4.0-deprecation-announcements/#removal-of-global-qos"
+     }}).
 
 -spec start_link
         (channel_number(), pid(), pid(), pid(), string(), rabbit_types:protocol(),
@@ -503,8 +512,9 @@ init([Channel, ReaderPid, WriterPid, ConnPid, ConnName, Protocol, User, VHost,
              true   -> flow;
              false  -> noflow
            end,
-    {ok, {Global, Prefetch}} = application:get_env(rabbit, default_consumer_prefetch),
+    {ok, {Global0, Prefetch}} = application:get_env(rabbit, default_consumer_prefetch),
     Limiter0 = rabbit_limiter:new(LimiterPid),
+    Global = Global0 andalso is_global_qos_permitted(),
     Limiter = case {Global, Prefetch} of
                   {true, 0} ->
                       rabbit_limiter:unlimit_prefetch(Limiter0);
@@ -518,6 +528,7 @@ init([Channel, ReaderPid, WriterPid, ConnPid, ConnName, Protocol, User, VHost,
     MaxMessageSize = get_max_message_size(),
     ConsumerTimeout = get_consumer_timeout(),
     OptionalVariables = extract_variable_map_from_amqp_params(AmqpParams),
+    UseExtendedReturnCallback = use_extended_return_callback(AmqpParams),
     {ok, GCThreshold} = application:get_env(rabbit, writer_gc_threshold),
     State = #ch{cfg = #conf{state = starting,
                             protocol = Protocol,
@@ -536,7 +547,8 @@ init([Channel, ReaderPid, WriterPid, ConnPid, ConnName, Protocol, User, VHost,
                             max_message_size = MaxMessageSize,
                             consumer_timeout = ConsumerTimeout,
                             authz_context = OptionalVariables,
-                            writer_gc_threshold = GCThreshold
+                            writer_gc_threshold = GCThreshold,
+                            extended_return_callback = UseExtendedReturnCallback
                            },
                 limiter = Limiter,
                 tx                      = none,
@@ -1076,6 +1088,15 @@ extract_variable_map_from_amqp_params([Value]) ->
 extract_variable_map_from_amqp_params(_) ->
     #{}.
 
+%% Use tuple representation of amqp_params to avoid a dependency on amqp_client.
+%% Used for AMQP 1.0
+use_extended_return_callback({amqp_params_direct,_,_,_,_,
+                              {amqp_adapter_info,_,_,_,_,_,{'AMQP',"1.0"},_},
+                              _}) ->
+    true;
+use_extended_return_callback(_) ->
+    false.
+
 check_msg_size(Content, MaxMessageSize, GCThreshold) ->
     Size = rabbit_basic:maybe_gc_large_msg(Content, GCThreshold),
     case Size of
@@ -1545,30 +1566,44 @@ handle_method(#'basic.qos'{global         = false,
                                         limiter = Limiter1}};
 
 handle_method(#'basic.qos'{global         = true,
-                           prefetch_count = 0},
-              _, State = #ch{limiter = Limiter}) ->
-    Limiter1 = rabbit_limiter:unlimit_prefetch(Limiter),
-    case rabbit_limiter:is_active(Limiter) of
-        true  -> rabbit_amqqueue:deactivate_limit_all(
-                   classic_consumer_queue_pids(State#ch.consumer_mapping), self());
-        false -> ok
-    end,
-    {reply, #'basic.qos_ok'{}, State#ch{limiter = Limiter1}};
+                           prefetch_count = 0} = Method,
+              Content,
+              State = #ch{limiter = Limiter}) ->
+    case is_global_qos_permitted() of
+        true ->
+            Limiter1 = rabbit_limiter:unlimit_prefetch(Limiter),
+            case rabbit_limiter:is_active(Limiter) of
+                true  -> rabbit_amqqueue:deactivate_limit_all(
+                           classic_consumer_queue_pids(State#ch.consumer_mapping), self());
+                false -> ok
+            end,
+            {reply, #'basic.qos_ok'{}, State#ch{limiter = Limiter1}};
+        false ->
+            Method1 = Method#'basic.qos'{global = false},
+            handle_method(Method1, Content, State)
+    end;
 
 handle_method(#'basic.qos'{global         = true,
-                           prefetch_count = PrefetchCount},
-              _, State = #ch{limiter = Limiter, unacked_message_q = UAMQ}) ->
-    %% TODO ?QUEUE:len(UAMQ) is not strictly right since that counts
-    %% unacked messages from basic.get too. Pretty obscure though.
-    Limiter1 = rabbit_limiter:limit_prefetch(Limiter,
-                                             PrefetchCount, ?QUEUE:len(UAMQ)),
-    case ((not rabbit_limiter:is_active(Limiter)) andalso
-          rabbit_limiter:is_active(Limiter1)) of
-        true  -> rabbit_amqqueue:activate_limit_all(
-                   classic_consumer_queue_pids(State#ch.consumer_mapping), self());
-        false -> ok
-    end,
-    {reply, #'basic.qos_ok'{}, State#ch{limiter = Limiter1}};
+                           prefetch_count = PrefetchCount} = Method,
+              Content,
+              State = #ch{limiter = Limiter, unacked_message_q = UAMQ}) ->
+    case is_global_qos_permitted() of
+        true ->
+            %% TODO ?QUEUE:len(UAMQ) is not strictly right since that counts
+            %% unacked messages from basic.get too. Pretty obscure though.
+            Limiter1 = rabbit_limiter:limit_prefetch(Limiter,
+                                                     PrefetchCount, ?QUEUE:len(UAMQ)),
+            case ((not rabbit_limiter:is_active(Limiter)) andalso
+                  rabbit_limiter:is_active(Limiter1)) of
+                true  -> rabbit_amqqueue:activate_limit_all(
+                           classic_consumer_queue_pids(State#ch.consumer_mapping), self());
+                false -> ok
+            end,
+            {reply, #'basic.qos_ok'{}, State#ch{limiter = Limiter1}};
+        false ->
+            Method1 = Method#'basic.qos'{global = false},
+            handle_method(Method1, Content, State)
+    end;
 
 handle_method(#'basic.recover_async'{requeue = true},
               _, State = #ch{unacked_message_q = UAMQ,
@@ -1917,9 +1952,8 @@ binding_action(Fun, SourceNameBin0, DestinationType, DestinationNameBin0,
             ok
     end.
 
-basic_return(#basic_message{exchange_name = ExchangeName,
-                            routing_keys  = [RoutingKey | _CcRoutes],
-                            content       = Content},
+basic_return(Content, #basic_message{exchange_name = ExchangeName,
+                                     routing_keys  = [RoutingKey | _CcRoutes]},
              State = #ch{cfg = #conf{protocol = Protocol,
                                      writer_pid = WriterPid}},
              Reason) ->
@@ -2154,7 +2188,9 @@ deliver_to_queues({Delivery = #delivery{message    = Message = #basic_message{ex
                                         mandatory  = Mandatory,
                                         confirm    = Confirm,
                                         msg_seq_no = MsgSeqNo},
-                   RoutedToQueueNames = [QName]}, State0 = #ch{queue_states = QueueStates0}) -> %% optimisation when there is one queue
+                   RoutedToQueueNames = [QName]},
+                   State0 = #ch{cfg = #conf{extended_return_callback = ExtendedReturnCallback},
+                                queue_states = QueueStates0}) -> %% optimisation when there is one queue
     Qs0 = rabbit_amqqueue:lookup_many(RoutedToQueueNames),
     Qs = rabbit_amqqueue:prepend_extra_bcc(Qs0),
     case rabbit_queue_type:deliver(Qs, Delivery, QueueStates0) of
@@ -2162,7 +2198,7 @@ deliver_to_queues({Delivery = #delivery{message    = Message = #basic_message{ex
             rabbit_global_counters:messages_routed(amqp091, erlang:min(1, length(Qs))),
             %% NB: the order here is important since basic.returns must be
             %% sent before confirms.
-            ok = process_routing_mandatory(Mandatory, Qs, Message, State0),
+            ok = process_routing_mandatory(ExtendedReturnCallback, Mandatory, Qs, MsgSeqNo, Message, State0),
             QueueNames = rabbit_amqqueue:queue_names(Qs),
             State1 = process_routing_confirm(Confirm, QueueNames, MsgSeqNo, XName, State0),
             %% Actions must be processed after registering confirms as actions may
@@ -2191,7 +2227,9 @@ deliver_to_queues({Delivery = #delivery{message    = Message = #basic_message{ex
                                         mandatory  = Mandatory,
                                         confirm    = Confirm,
                                         msg_seq_no = MsgSeqNo},
-                   RoutedToQueueNames}, State0 = #ch{queue_states = QueueStates0}) ->
+                   RoutedToQueueNames},
+                   State0 = #ch{cfg = #conf{extended_return_callback = ExtendedReturnCallback},
+                                queue_states = QueueStates0}) ->
     Qs0 = rabbit_amqqueue:lookup_many(RoutedToQueueNames),
     Qs = rabbit_amqqueue:prepend_extra_bcc(Qs0),
     case rabbit_queue_type:deliver(Qs, Delivery, QueueStates0) of
@@ -2199,7 +2237,7 @@ deliver_to_queues({Delivery = #delivery{message    = Message = #basic_message{ex
             rabbit_global_counters:messages_routed(amqp091, length(Qs)),
             %% NB: the order here is important since basic.returns must be
             %% sent before confirms.
-            ok = process_routing_mandatory(Mandatory, Qs, Message, State0),
+            ok = process_routing_mandatory(ExtendedReturnCallback, Mandatory, Qs, MsgSeqNo, Message, State0),
             QueueNames = rabbit_amqqueue:queue_names(Qs),
             State1 = process_routing_confirm(Confirm, QueueNames,
                                              MsgSeqNo, XName, State0),
@@ -2222,19 +2260,32 @@ deliver_to_queues({Delivery = #delivery{message    = Message = #basic_message{ex
               [rabbit_misc:rs(Resource)])
     end.
 
-process_routing_mandatory(_Mandatory = true,
+process_routing_mandatory(_ExtendedReturnCallback = false,
+                          _Mandatory = true,
                           _RoutedToQs = [],
-                          Msg, State) ->
+                          _MsgSeqNo,
+                          #basic_message{content = Content} = Msg, State) ->
     rabbit_global_counters:messages_unroutable_returned(amqp091, 1),
-    ok = basic_return(Msg, State, no_route),
+    ok = basic_return(Content, Msg, State, no_route),
     ok;
-process_routing_mandatory(_Mandatory = false,
+process_routing_mandatory(_ExtendedReturnCallback = true,
+                          _Mandatory = true,
                           _RoutedToQs = [],
+                          MsgSeqNo,
+                          #basic_message{content = Content} = Msg, State) ->
+    rabbit_global_counters:messages_unroutable_returned(amqp091, 1),
+    %% providing the publishing sequence for AMQP 1.0
+    ok = basic_return({MsgSeqNo, Content}, Msg, State, no_route),
+    ok;
+process_routing_mandatory(_ExtendedReturnCallback,
+                          _Mandatory = false,
+                          _RoutedToQs = [],
+                          _MsgSeqNo,
                           #basic_message{exchange_name = ExchangeName}, State) ->
     rabbit_global_counters:messages_unroutable_dropped(amqp091, 1),
     ?INCR_STATS(exchange_stats, ExchangeName, 1, drop_unroutable, State),
     ok;
-process_routing_mandatory(_, _, _, _) ->
+process_routing_mandatory(_, _, _, _, _, _) ->
     ok.
 
 process_routing_confirm(false, _, _, _, State) ->
@@ -2913,3 +2964,6 @@ maybe_decrease_global_publishers(#ch{publishing_mode = false}) ->
     ok;
 maybe_decrease_global_publishers(#ch{publishing_mode = true}) ->
     rabbit_global_counters:publisher_deleted(amqp091).
+
+is_global_qos_permitted() ->
+    rabbit_deprecated_features:is_permitted(global_qos).
