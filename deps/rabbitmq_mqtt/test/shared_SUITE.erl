@@ -824,7 +824,7 @@ delete_create_queue(Config) ->
 
 session_expiry(Config) ->
     App = rabbitmq_mqtt,
-    Par = max_session_expiry_interval_secs,
+    Par = max_session_expiry_interval_seconds,
     Seconds = 1,
     {ok, DefaultVal} = rpc(Config, application, get_env, [App, Par]),
     ok = rpc(Config, application, set_env, [App, Par, Seconds]),
@@ -906,8 +906,8 @@ non_clean_sess_reconnect_qos0_and_qos1(Config) ->
                  get_global_counters(Config)),
 
     ok = emqtt:disconnect(C1),
-    ?assertMatch(#{consumers := 0},
-                 get_global_counters(Config)),
+    eventually(?_assertMatch(#{consumers := 0},
+                             get_global_counters(Config))),
 
     {ok, _} = emqtt:publish(Pub, Topic0, <<"msg-0">>, qos1),
     {ok, _} = emqtt:publish(Pub, Topic1, <<"msg-1">>, qos1),

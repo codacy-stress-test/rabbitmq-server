@@ -31,7 +31,7 @@ bazel_dep(
 
 bazel_dep(
     name = "rules_erlang",
-    version = "3.11.1",
+    version = "3.11.3",
 )
 
 bazel_dep(
@@ -72,8 +72,8 @@ erlang_config.internal_erlang_from_github_release(
 
 erlang_config.internal_erlang_from_github_release(
     name = "25_3",
-    sha256 = "8c1e8811201d1e9cc806b74393db16e89a119f412e16bb5f6181d54cd102eb4f",
-    version = "25.3.2.3",
+    sha256 = "9d224c098abbb48fbe42abb81bd04765efa2190d9eae4898f78183d9725a676b",
+    version = "25.3.2.4",
 )
 
 erlang_config.internal_erlang_from_github_release(
@@ -268,6 +268,7 @@ erlang_package.hex_package(
 )
 
 erlang_package.git_package(
+    build_file = "@rabbitmq-server//bazel:BUILD.osiris",
     repository = "rabbitmq/osiris",
     tag = "v1.6.0",
 )
@@ -289,8 +290,8 @@ erlang_package.hex_package(
 erlang_package.hex_package(
     name = "ra",
     build_file = "@rabbitmq-server//bazel:BUILD.ra",
-    sha256 = "57c8a795193433f2629f8aced3f8055963b0ae1793d1421180c85d0c4f9b7586",
-    version = "2.6.2",
+    sha256 = "1cc3101c8f7382dc73bb3fc9f044c16261306f5cbba3d79a5a6f5176695f7a18",
+    version = "2.6.3",
 )
 
 erlang_package.hex_package(

@@ -148,7 +148,7 @@ process_connect(
     MaxPacketSize = maps:get('Maximum-Packet-Size', ConnectProps, ?MAX_PACKET_SIZE),
     TopicAliasMax = persistent_term:get(?PERSISTENT_TERM_TOPIC_ALIAS_MAXIMUM),
     TopicAliasMaxOutbound = min(maps:get('Topic-Alias-Maximum', ConnectProps, 0), TopicAliasMax),
-    {ok, MaxSessionExpiry} = application:get_env(?APP_NAME, max_session_expiry_interval_secs),
+    {ok, MaxSessionExpiry} = application:get_env(?APP_NAME, max_session_expiry_interval_seconds),
     SessionExpiry =
     case {ProtoVer, CleanStart} of
         {5, _} ->
@@ -157,7 +157,7 @@ process_connect(
                 ?UINT_MAX ->
                     %% "If the Session Expiry Interval is 0xFFFFFFFF (UINT_MAX),
                     %% the Session does not expire."
-                    min(infinity, MaxSessionExpiry);
+                    MaxSessionExpiry;
                 Seconds ->
                     min(Seconds, MaxSessionExpiry)
             end;
@@ -569,7 +569,7 @@ process_request(?DISCONNECT,
             State0;
         _ ->
             %% "The session expiry interval can be modified at disconnect."
-            {ok, MaxSEI} = application:get_env(?APP_NAME, max_session_expiry_interval_secs),
+            {ok, MaxSEI} = application:get_env(?APP_NAME, max_session_expiry_interval_seconds),
             NewSEI = min(RequestedSEI, MaxSEI),
             lists:foreach(fun(QName) ->
                                   update_session_expiry_interval(QName, NewSEI)
@@ -2167,7 +2167,7 @@ mqtt_props_to_amqp_props(Props, Qos, Retain) ->
                  %% the binary queue name in AMQP 0.9.1: "One of the standard message properties is
                  %% Reply-To, which is designed specifically for carrying the name of reply queues."
                  %% Therefore, we add a custom header.
-                 P2#'P_basic'{headers = [{<<"x-reply-to-topic">>, longstr,
+                 P2#'P_basic'{headers = [{<<"x-opt-reply-to-topic">>, longstr,
                                           %% Convert such that an AMQP consumer can respond.
                                           mqtt_to_amqp(Topic)} |
                                          P2#'P_basic'.headers]};
@@ -2258,8 +2258,8 @@ amqp_props_to_mqtt_props(
              _ ->
                  P1
          end,
-    P3 = case rabbit_basic:header(<<"x-reply-to-topic">>, Headers) of
-             {<<"x-reply-to-topic">>, longstr, Topic}
+    P3 = case rabbit_basic:header(<<"x-opt-reply-to-topic">>, Headers) of
+             {<<"x-opt-reply-to-topic">>, longstr, Topic}
                when is_binary(Topic) ->
                  P2#{'Response-Topic' => amqp_to_mqtt(Topic)};
              _ ->

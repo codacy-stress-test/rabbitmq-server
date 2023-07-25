@@ -198,7 +198,7 @@ init_per_testcase(T, Config)
   when T =:= session_expiry_disconnect_infinity_to_zero;
        T =:= session_expiry_disconnect_to_infinity;
        T =:= session_expiry_reconnect_infinity_to_zero ->
-    Par = max_session_expiry_interval_secs,
+    Par = max_session_expiry_interval_seconds,
     {ok, Default} = rpc(Config, application, get_env, [?APP, Par]),
     ok = rpc(Config, application, set_env, [?APP, Par, infinity]),
     Config1 = rabbit_ct_helpers:set_config(Config, {Par, Default}),
@@ -215,7 +215,7 @@ end_per_testcase(T, Config)
   when T =:= session_expiry_disconnect_infinity_to_zero;
        T =:= session_expiry_disconnect_to_infinity;
        T =:= session_expiry_reconnect_infinity_to_zero ->
-    Par = max_session_expiry_interval_secs,
+    Par = max_session_expiry_interval_seconds,
     Default = ?config(Par, Config),
     ok = rpc(Config, application, set_env, [?APP, Par, Default]),
     end_per_testcase0(T, Config);
@@ -1328,7 +1328,7 @@ publish_property_mqtt_to_amqp091(Config) ->
                                   correlation_id = Correlation,
                                   delivery_mode = 2,
                                   headers = Headers}}} = amqp_channel:call(Ch, #'basic.get'{queue = Q}),
-    {<<"x-reply-to-topic">>, longstr, AmqpResponseTopic} = rabbit_basic:header(<<"x-reply-to-topic">>, Headers),
+    {<<"x-opt-reply-to-topic">>, longstr, AmqpResponseTopic} = rabbit_basic:header(<<"x-opt-reply-to-topic">>, Headers),
     ReplyPayload = <<"{\"my\" : \"reply\"}">>,
     amqp_channel:call(Ch, #'basic.publish'{exchange = <<"amq.topic">>,
                                            routing_key = AmqpResponseTopic},

@@ -6,6 +6,9 @@
 %%
 
 -module(rabbit_queue_type).
+
+-behaviour(rabbit_registry_class).
+
 -include("amqqueue.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 
@@ -49,6 +52,13 @@
          notify_decorators/1
          ]).
 
+-export([
+         added_to_rabbit_registry/2,
+         removed_from_rabbit_registry/1,
+         known_queue_type_names/0,
+         known_queue_type_modules/0
+        ]).
+
 -type queue_name() :: rabbit_amqqueue:name().
 -type queue_state() :: term().
 -type msg_tag() :: term().
@@ -64,7 +74,8 @@
 -define(DOWN_KEYS, [name, durable, auto_delete, arguments, pid, recoverable_slaves, type, state]).
 
 %% TODO resolve all registered queue types from registry
--define(QUEUE_TYPES, [rabbit_classic_queue, rabbit_quorum_queue, rabbit_stream_queue]).
+-define(QUEUE_MODULES, [rabbit_classic_queue, rabbit_quorum_queue, rabbit_stream_queue]).
+-define(KNOWN_QUEUE_TYPES, [<<"classic">>, <<"quorum">>, <<"stream">>]).
 
 %% anything that the host process needs to do on behalf of the queue type session
 -type action() ::
@@ -225,7 +236,11 @@ discover(<<"quorum">>) ->
 discover(<<"classic">>) ->
     rabbit_classic_queue;
 discover(<<"stream">>) ->
-    rabbit_stream_queue.
+    rabbit_stream_queue;
+discover(Other) when is_binary(Other) ->
+    T = rabbit_registry:binary_to_type(Other),
+    {ok, Mod} = rabbit_registry:lookup_module(queue, T),
+    Mod.
 
 feature_flag_name(<<"quorum">>) ->
     quorum_queue;
@@ -354,7 +369,7 @@ is_server_named_allowed(Type) ->
 arguments(ArgumentType) ->
     Args0 = lists:map(fun(T) ->
                               maps:get(ArgumentType, T:capabilities(), [])
-                      end, ?QUEUE_TYPES),
+                      end, known_queue_type_modules()),
     Args = lists:flatten(Args0),
     lists:usort(Args).
 
@@ -423,7 +438,7 @@ is_recoverable(Q) ->
     {Recovered :: [amqqueue:amqqueue()],
      Failed :: [amqqueue:amqqueue()]}.
 recover(VHost, Qs) ->
-    ByType0 = maps:from_keys(?QUEUE_TYPES, []),
+    ByType0 = maps:from_keys(known_queue_type_modules(), []),
     ByType = lists:foldl(
                fun (Q, Acc) ->
                        T = amqqueue:get_type(Q),
@@ -618,6 +633,13 @@ dequeue(Q, NoAck, LimiterPid, CTag, Ctxs) ->
             Err
     end.
 
+
+-spec added_to_rabbit_registry(atom(), atom()) -> ok.
+added_to_rabbit_registry(_Type, _ModuleName) -> ok.
+
+-spec removed_from_rabbit_registry(atom()) -> ok.
+removed_from_rabbit_registry(_Type) -> ok.
+
 get_ctx(QOrQref, State) ->
     get_ctx_with(QOrQref, State, undefined).
 
@@ -665,3 +687,16 @@ qref(#resource{kind = queue} = QName) ->
     QName;
 qref(Q) when ?is_amqqueue(Q) ->
     amqqueue:get_name(Q).
+
+-spec known_queue_type_modules() -> [module()].
+known_queue_type_modules() ->
+    Registered = rabbit_registry:lookup_all(queue),
+    {_, Modules} = lists:unzip(Registered),
+    ?QUEUE_MODULES ++ Modules.
+
+-spec known_queue_type_names() -> [binary()].
+known_queue_type_names() ->
+    Registered = rabbit_registry:lookup_all(queue),
+    {QueueTypes, _} = lists:unzip(Registered),
+    QTypeBins = lists:map(fun(X) -> atom_to_binary(X) end, QueueTypes),
+    ?KNOWN_QUEUE_TYPES ++ QTypeBins.

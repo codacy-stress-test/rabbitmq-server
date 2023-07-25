@@ -34,7 +34,7 @@ APP_ENV = """[
 	    {allow_anonymous, true},
 	    {vhost, <<"/">>},
 	    {exchange, <<"amq.topic">>},
-	    {max_session_expiry_interval_secs, 86400}, %% 1 day
+	    {max_session_expiry_interval_seconds, 86400}, %% 1 day
 	    {retained_message_store, rabbit_mqtt_retained_msg_store_dets},
 	    %% only used by DETS store
 	    {retained_message_store_dets_sync_interval, 2000},
@@ -67,8 +67,6 @@ test_suite_beam_files(name = "test_suite_beam_files")
 
 # gazelle:erlang_app_extra_app ssl
 
-# gazelle:erlang_app_dep amqp_client
-
 rabbitmq_app(
     name = "erlang_app",
     srcs = [":all_srcs"],
@@ -83,7 +81,6 @@ rabbitmq_app(
     license_files = [":license_files"],
     priv = [":priv"],
     deps = [
-        "//deps/amqp_client:erlang_app",
         "//deps/rabbit:erlang_app",
         "//deps/rabbit_common:erlang_app",
         "@ra//:erlang_app",
