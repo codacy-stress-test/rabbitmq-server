@@ -116,10 +116,13 @@
          running_remote_nodes/0,
          does_node_support/3,
          inject_test_feature_flags/1, inject_test_feature_flags/2,
+         clear_injected_test_feature_flags/0,
          query_supported_feature_flags/0,
          does_enabled_feature_flags_list_file_exist/0,
          read_enabled_feature_flags_list/0,
-         uses_callbacks/1]).
+         copy_feature_states_after_reset/1,
+         uses_callbacks/1,
+         reset_registry/0]).
 
 -ifdef(TEST).
 -export([override_nodes/1,
@@ -811,6 +814,10 @@ inject_test_feature_flags(FeatureFlags, InitReg) ->
         false -> ok
     end.
 
+clear_injected_test_feature_flags() ->
+    _ = persistent_term:erase(?PT_TESTSUITE_ATTRS),
+    ok.
+
 module_attributes_from_testsuite() ->
     persistent_term:get(?PT_TESTSUITE_ATTRS, []).
 
@@ -1102,11 +1109,11 @@ try_to_write_enabled_feature_flags_list(FeatureNames) ->
                         end,
     FeatureNames1 = lists:filter(
                       fun(FeatureName) ->
-                              case rabbit_ff_registry:get(FeatureName) of
-                                  undefined ->
-                                      false;
-                                  FeatureProps ->
-                                      ?IS_FEATURE_FLAG(FeatureProps)
+                              FeatureProps = rabbit_ff_registry_wrapper:get(
+                                               FeatureName),
+                              case FeatureProps of
+                                  undefined -> false;
+                                  _         -> ?IS_FEATURE_FLAG(FeatureProps)
                               end
                       end, FeatureNames),
     FeatureNames2 = lists:foldl(
@@ -1116,10 +1123,13 @@ try_to_write_enabled_feature_flags_list(FeatureNames) ->
                                   false -> [Name | Acc]
                               end
                       end, FeatureNames1, PreviouslyEnabled),
-    FeatureNames3 = lists:sort(FeatureNames2),
+    do_write_enabled_feature_flags_list(FeatureNames2).
+
+do_write_enabled_feature_flags_list(EnabledFeatureNames) ->
+    EnabledFeatureNames1 = lists:sort(EnabledFeatureNames),
 
     File = enabled_feature_flags_list_file(),
-    Content = io_lib:format("~tp.~n", [FeatureNames3]),
+    Content = io_lib:format("~tp.~n", [EnabledFeatureNames1]),
     %% TODO: If we fail to write the the file, we should spawn a process
     %% to retry the operation.
     case file:write_file(File, Content) of
@@ -1144,6 +1154,24 @@ enabled_feature_flags_list_file() ->
     case application:get_env(rabbit, feature_flags_file) of
         {ok, Val} -> Val;
         undefined -> throw(feature_flags_file_not_set)
+    end.
+
+copy_feature_states_after_reset(RemoteNode) ->
+    ?assertEqual(undefined, erlang:whereis(rabbit_ff_controller)),
+    EnabledFeatureFlags = erpc:call(
+                            RemoteNode, ?MODULE, list, [enabled], 60000),
+    EnabledFeatureNames = maps:keys(EnabledFeatureFlags),
+    ?LOG_DEBUG(
+       "Feature flags: copy feature states from remote node `~ts` after "
+       "a reset of this node `~ts`; enabled feature flags:~n~p",
+       [RemoteNode, node(), EnabledFeatureNames],
+       #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
+    case do_write_enabled_feature_flags_list(EnabledFeatureNames) of
+        ok ->
+            ok;
+        {error, Reason} ->
+            File = enabled_feature_flags_list_file(),
+            throw({feature_flags_file_copy_error, File, Reason})
     end.
 
 %% -------------------------------------------------------------------
@@ -1293,3 +1321,12 @@ sync_feature_flags_with_cluster(Nodes, _NodeIsVirgin) ->
 
 refresh_feature_flags_after_app_load() ->
     rabbit_ff_controller:refresh_after_app_load().
+
+-spec reset_registry() -> ok.
+%% @doc Resets the feature flags registry.
+%%
+%% The registry will be automatically reloaded with the next use of it, after
+%% reading the recorded state from disc.
+
+reset_registry() ->
+    rabbit_ff_registry_factory:reset_registry().

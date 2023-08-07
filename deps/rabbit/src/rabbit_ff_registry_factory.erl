@@ -114,8 +114,9 @@ initialize_registry(NewSupportedFeatureFlags) ->
     RegistryInitialized = rabbit_ff_registry:is_registry_initialized(),
     FeatureStates = case RegistryInitialized of
                         true ->
-                            CurrentFeatureStates = rabbit_ff_registry:states(),
-                            maps:merge(FeatureStates0, CurrentFeatureStates);
+                            maps:merge(
+                              FeatureStates0,
+                              rabbit_ff_registry_wrapper:states());
                         false ->
                             FeatureStates0
                     end,
@@ -205,7 +206,7 @@ maybe_initialize_registry(NewSupportedFeatureFlags,
     %% We take the feature flags already registered.
     RegistryInitialized = rabbit_ff_registry:is_registry_initialized(),
     KnownFeatureFlags1 = case RegistryInitialized of
-                             true  -> rabbit_ff_registry:list(all);
+                             true  -> rabbit_ff_registry_wrapper:list(all);
                              false -> #{}
                          end,
 
@@ -253,12 +254,13 @@ maybe_initialize_registry(NewSupportedFeatureFlags,
     not rabbit_feature_flags:does_enabled_feature_flags_list_file_exist(),
     FeatureStates0 = case RegistryInitialized of
                          true ->
-                             maps:merge(rabbit_ff_registry:states(),
-                                        NewFeatureStates);
+                             maps:merge(
+                               rabbit_ff_registry_wrapper:states(),
+                               NewFeatureStates);
                          false ->
                              NewFeatureStates
                      end,
-    FeatureStates =
+    FeatureStates1 =
     maps:map(
       fun
           (FeatureName, FeatureProps) when ?IS_FEATURE_FLAG(FeatureProps) ->
@@ -307,6 +309,18 @@ maybe_initialize_registry(NewSupportedFeatureFlags,
                             FeatureName, FeatureProps)
               end
       end, AllFeatureFlags),
+
+    %% We don't record the state of deprecated features because it is
+    %% controlled from configuration and they can be disabled (the deprecated
+    %% feature can be turned back on) if the deprecated feature allows it.
+    %%
+    %% However, some feature flags may depend on deprecated features. If those
+    %% feature flags are enabled, we need to enable the deprecated features
+    %% (turn off the deprecated features) they depend on regardless of the
+    %% configuration.
+    FeatureStates =
+    enable_deprecated_features_required_by_enabled_feature_flags(
+      AllFeatureFlags, FeatureStates1),
 
     %% The feature flags inventory is used by rabbit_ff_controller to query
     %% feature flags atomically. The inventory also contains the list of
@@ -362,8 +376,8 @@ does_registry_need_refresh(AllFeatureFlags,
             %% Before proceeding with the actual
             %% (re)initialization, let's see if there are any
             %% changes.
-            CurrentAllFeatureFlags = rabbit_ff_registry:list(all),
-            CurrentFeatureStates = rabbit_ff_registry:states(),
+            CurrentAllFeatureFlags = rabbit_ff_registry_wrapper:list(all),
+            CurrentFeatureStates = rabbit_ff_registry_wrapper:states(),
             CurrentWrittenToDisk =
             rabbit_ff_registry:is_registry_written_to_disk(),
 
@@ -398,6 +412,39 @@ does_registry_need_refresh(AllFeatureFlags,
               "yes, first-time initialization",
               #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
             true
+    end.
+
+-spec enable_deprecated_features_required_by_enabled_feature_flags(
+        FeatureFlags, FeatureStates) -> NewFeatureStates when
+      FeatureFlags :: rabbit_feature_flags:feature_flags(),
+      FeatureStates :: rabbit_feature_flags:feature_states(),
+      NewFeatureStates :: rabbit_feature_flags:feature_states().
+
+enable_deprecated_features_required_by_enabled_feature_flags(
+  FeatureFlags, FeatureStates) ->
+    FeatureStates1 =
+    maps:map(
+      fun
+          (DependencyName, false) ->
+              RequiredBy =
+              maps:filter(
+                fun
+                    (FeatureName, #{depends_on := DependsOn}) ->
+                        lists:member(DependencyName, DependsOn) andalso
+                        maps:get(FeatureName, FeatureStates) =:= true;
+                    (_FeatureName, _FeatureProps) ->
+                        false
+                end, FeatureFlags),
+              maps:size(RequiredBy) > 0;
+          (_DependencyName, State) ->
+              State
+      end, FeatureStates),
+    case FeatureStates1 of
+        FeatureStates ->
+            FeatureStates;
+        _ ->
+            enable_deprecated_features_required_by_enabled_feature_flags(
+              FeatureFlags, FeatureStates1)
     end.
 
 -spec do_initialize_registry(Vsn,
