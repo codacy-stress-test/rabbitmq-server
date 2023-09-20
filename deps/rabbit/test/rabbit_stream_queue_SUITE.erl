@@ -16,6 +16,8 @@
 -compile(nowarn_export_all).
 -compile(export_all).
 
+-define(WAIT, 5000).
+
 suite() ->
     [{timetrap, 15 * 60000}].
 
@@ -583,7 +585,7 @@ delete_replica(Config) ->
                  declare(Config, Server0, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
     check_leader_and_replicas(Config, [Server0, Server1, Server2]),
     %% Not a member of the cluster, what would happen?
-    ?assertEqual({error, node_not_running},
+    ?assertEqual(ok,
                  rpc:call(Server0, rabbit_stream_queue, delete_replica,
                           [<<"/">>, Q, 'zen@rabbit'])),
     ?assertEqual(ok,
@@ -725,17 +727,20 @@ delete_down_replica(Config) ->
                  declare(Config, Server0, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
     check_leader_and_replicas(Config, [Server0, Server1, Server2]),
     ok = rabbit_ct_broker_helpers:stop_node(Config, Server1),
-    ?assertEqual({error, node_not_running},
+    ?assertEqual(ok,
                  rpc:call(Server0, rabbit_stream_queue, delete_replica,
                           [<<"/">>, Q, Server1])),
-    %% check it isn't gone
-    check_leader_and_replicas(Config, [Server0, Server1, Server2], members),
+    %% check it's gone
+    check_leader_and_replicas(Config, [Server0, Server2], members),
     ok = rabbit_ct_broker_helpers:start_node(Config, Server1),
-    rabbit_ct_helpers:await_condition(
-      fun() ->
-              ok == rpc:call(Server0, rabbit_stream_queue, delete_replica,
-                             [<<"/">>, Q, Server1])
-      end),
+    check_leader_and_replicas(Config, [Server0, Server2], members),
+    %% check the folder was deleted
+    QName = rabbit_misc:r(<<"/">>, queue, Q),
+    StreamId = rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, get_stream_id, [QName]),
+    Server1DataDir = rabbit_ct_broker_helpers:get_node_config(Config, 1, data_dir),
+    DeletedReplicaDir = filename:join([Server1DataDir, "stream", StreamId]),
+    timer:sleep(1000),
+    ?awaitMatch(false, filelib:is_dir(DeletedReplicaDir), ?WAIT),
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]).
 
 publish_coordinator_unavailable(Config) ->
@@ -783,7 +788,7 @@ publish(Config) ->
                  declare(Config, Server, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
 
     publish(Ch, Q),
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]]),
+    queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]]),
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]).
 
 publish_confirm(Config) ->
@@ -798,7 +803,7 @@ publish_confirm(Config) ->
     amqp_channel:register_confirm_handler(Ch, self()),
     publish(Ch, Q),
     amqp_channel:wait_for_confirms(Ch, 5),
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]]),
+    queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]]),
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]).
 
 restart_single_node(Config) ->
@@ -809,15 +814,15 @@ restart_single_node(Config) ->
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
                  declare(Config, Server, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
     publish(Ch, Q),
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]]),
+    queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]]),
 
     rabbit_control_helper:command(stop_app, Server),
     rabbit_control_helper:command(start_app, Server),
 
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]]),
+    queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]]),
     Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
     publish(Ch1, Q),
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"2">>, <<"2">>, <<"0">>]]),
+    queue_utils:wait_for_messages(Config, [[Q, <<"2">>, <<"2">>, <<"0">>]]),
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]).
 
 %% the failing case for this test relies on a particular random condition
@@ -861,7 +866,7 @@ recover(Config) ->
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
                  declare(Config, Server, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
     publish(Ch, Q),
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]]),
+    queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]]),
 
     Perm0 = permute(Servers0),
     Servers = lists:nth(rand:uniform(length(Perm0)), Perm0),
@@ -873,7 +878,7 @@ recover(Config) ->
     [rabbit_ct_broker_helpers:start_node(Config, S) || S <- lists:reverse(Servers)],
     ct:pal("recover: running stop waiting for messages ~w", [Servers]),
     check_leader_and_replicas(Config, Servers0),
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]], 60),
+    queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]], 60),
 
     %% Another single random permutation
     Perm1 = permute(Servers0),
@@ -884,11 +889,11 @@ recover(Config) ->
     [rabbit_control_helper:command(start_app, S) || S <- lists:reverse(Servers1)],
     ct:pal("recover: running app stop waiting for messages ~w", [Servers1]),
     check_leader_and_replicas(Config, Servers0),
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]], 60),
+    queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]], 60),
 
     Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
     publish(Ch1, Q),
-    quorum_queue_utils:wait_for_messages(Config, [[Q, <<"2">>, <<"2">>, <<"0">>]]),
+    queue_utils:wait_for_messages(Config, [[Q, <<"2">>, <<"2">>, <<"0">>]]),
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]).
 
 restart_coordinator_without_queues(Config) ->
@@ -1294,6 +1299,12 @@ get_leader_info(QName) ->
             {error, not_found}
     end.
 
+get_stream_id(QName) ->
+    {ok, Q} = rabbit_amqqueue:lookup(QName),
+    QState = amqqueue:get_type_state(Q),
+    #{name := StreamId} = QState,
+    StreamId.
+
 kill_process(Config, Node, Pid) ->
     rabbit_ct_broker_helpers:rpc(Config, Node, ?MODULE, do_kill_process,
                                  [Pid]).
@@ -1396,7 +1407,7 @@ consume_and_ack(Config) ->
             %%
             ?assertMatch({'queue.declare_ok', Q, _MsgCount, 0},
                          declare(Config, Server, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
-            quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]])
+            queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]])
     after 5000 ->
             exit(timeout)
     end,
@@ -1834,8 +1845,8 @@ max_age(Config) ->
     amqp_channel:wait_for_confirms(Ch, 5),
 
     %% Let's give it some margin if some messages fall between segments
-    quorum_queue_utils:wait_for_min_messages(Config, Q, 100),
-    quorum_queue_utils:wait_for_max_messages(Config, Q, 150),
+    queue_utils:wait_for_min_messages(Config, Q, 100),
+    queue_utils:wait_for_max_messages(Config, Q, 150),
 
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]).
 
@@ -2301,7 +2312,7 @@ update_retention_policy(Config) ->
 
     %% Retention policy should clear approximately 2/3 of the messages, but just to be safe
     %% let's simply check that it removed half of them
-    quorum_queue_utils:wait_for_max_messages(Config, Q, 5000),
+    queue_utils:wait_for_max_messages(Config, Q, 5000),
 
     {ok, Q1} = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_amqqueue, lookup,
                                             [rabbit_misc:r(<<"/">>, queue, Q)]),
@@ -2419,7 +2430,7 @@ dead_letter_target(Config) ->
             ok = amqp_channel:cast(Ch1, #'basic.nack'{delivery_tag = DeliveryTag,
                                                       requeue =false,
                                                       multiple     = false}),
-            quorum_queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]])
+            queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]])
     after 5000 ->
             exit(timeout)
     end,

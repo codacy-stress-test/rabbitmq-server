@@ -91,8 +91,11 @@ convert_from(mc_amqp, Sections) ->
                 %% TODO: This is potentially inefficient, but #content.payload_fragments_rev expects
                 %% currently a flat list of binaries. Can we make rabbit_writer work
                 %% with an iolist instead?
-                {[erlang:iolist_to_iovec(amqp10_framing:encode_bin(X))
-                  || X <- BodyRev], ?AMQP10_TYPE}
+                BinsRev = [begin
+                               IoList = amqp10_framing:encode_bin(X),
+                               erlang:iolist_to_binary(IoList)
+                           end || X <- BodyRev],
+                {BinsRev, ?AMQP10_TYPE}
         end,
     #'v1_0.properties'{message_id = MsgId,
                        user_id = UserId0,
@@ -143,9 +146,17 @@ convert_from(mc_amqp, Sections) ->
     Headers0 = [to_091(K, V) || {{utf8, K}, V} <- AP,
                                 byte_size(K) =< ?AMQP_LEGACY_FIELD_NAME_MAX_LEN],
     %% Add remaining message annotations as headers?
-    XHeaders = [to_091(K, V) || {{symbol, K}, V} <- MA,
-                                not is_internal_header(K),
-                                byte_size(K) =< ?AMQP_LEGACY_FIELD_NAME_MAX_LEN],
+    XHeaders = lists:filtermap(fun({{symbol, <<"x-cc">>}, V}) ->
+                                       {true, to_091(<<"CC">>, V)};
+                                  ({{symbol, K}, V})
+                                    when byte_size(K) =< ?AMQP_LEGACY_FIELD_NAME_MAX_LEN ->
+                                       case is_internal_header(K) of
+                                           false -> {true, to_091(K, V)};
+                                           true -> false
+                                       end;
+                                  (_) ->
+                                       false
+                               end, MA),
     {Headers1, MsgId091} = message_id(MsgId, <<"x-message-id">>, Headers0),
     {Headers, CorrId091} = message_id(CorrId, <<"x-correlation-id">>, Headers1),
 
@@ -327,14 +338,18 @@ convert_to(mc_amqp, #content{payload_fragments_rev = Payload} = Content) ->
     %% x- headers are stored as message annotations
     MA = case amqp10_section_header(?AMQP10_MESSAGE_ANNOTATIONS_HEADER, Headers) of
              undefined ->
-                 MAC0 = [{{symbol, K}, from_091(T, V)}
-                         || {K, T, V} <- Headers,
-                            mc_util:is_x_header(K),
-                            %% all message annotation keys need to be either a symbol or ulong
-                            %% but 0.9.1 field-table names are always strings
-                            is_binary(K)
-                        ],
-
+                 MAC0 = lists:filtermap(
+                          fun({<<"x-", _/binary>> = K, T, V}) ->
+                                  %% All message annotation keys need to be either a symbol or ulong
+                                  %% but 0.9.1 field-table names are always strings.
+                                  {true, {{symbol, K}, from_091(T, V)}};
+                             ({<<"CC">>, T = array, V}) ->
+                                  %% Special case the 0.9.1 CC header into 1.0 message annotations because
+                                  %% 1.0 application properties must not contain list or array values.
+                                  {true, {{symbol, <<"x-cc">>}, from_091(T, V)}};
+                             (_) ->
+                                  false
+                          end, Headers),
                  %% `type' doesn't have a direct equivalent so adding as
                  %% a message annotation here
                  MAC = map_add(symbol, <<"x-basic-type">>, utf8, Type, MAC0),
@@ -418,12 +433,13 @@ protocol_state(Content0, Anns) ->
     %% changed
     protocol_state(prepare(read, Content0), Anns).
 
--spec message(rabbit_types:exchange_name(), rabbit_types:routing_key(), #content{}) -> mc:state().
+-spec message(rabbit_types:exchange_name(), rabbit_types:routing_key(), #content{}) ->
+    {ok, mc:state()} | {error, Reason :: any()}.
 message(ExchangeName, RoutingKey, Content) ->
     message(ExchangeName, RoutingKey, Content, #{}).
 
 -spec message(rabbit_types:exchange_name(), rabbit_types:routing_key(), #content{}, map()) ->
-    mc:state().
+    {ok, mc:state()} | {error, Reason :: any()}.
 message(XName, RoutingKey, Content, Anns) ->
     message(XName, RoutingKey, Content, Anns,
             rabbit_feature_flags:is_enabled(message_containers)).
@@ -434,19 +450,27 @@ message(#resource{name = ExchangeNameBin}, RoutingKey,
         #content{properties = Props} = Content, Anns, true)
   when is_binary(RoutingKey) andalso
        is_map(Anns) ->
-    HeaderRoutes = rabbit_basic:header_routes(Props#'P_basic'.headers),
-    mc:init(?MODULE,
-            rabbit_basic:strip_bcc_header(Content),
-            Anns#{routing_keys => [RoutingKey | HeaderRoutes],
-                  exchange => ExchangeNameBin});
+    case rabbit_basic:header_routes(Props#'P_basic'.headers) of
+        {error, _} = Error ->
+            Error;
+        HeaderRoutes ->
+            {ok, mc:init(?MODULE,
+                         rabbit_basic:strip_bcc_header(Content),
+                         Anns#{routing_keys => [RoutingKey | HeaderRoutes],
+                               exchange => ExchangeNameBin})}
+    end;
 message(#resource{} = XName, RoutingKey,
         #content{} = Content, Anns, false) ->
-    {ok, Msg} = rabbit_basic:message(XName, RoutingKey, Content),
-    case Anns of
-        #{id := Id} ->
-            Msg#basic_message{id = Id};
-        _ ->
-            Msg
+    case rabbit_basic:message(XName, RoutingKey, Content) of
+        {ok, Msg} ->
+            case Anns of
+                #{id := Id} ->
+                    {ok, Msg#basic_message{id = Id}};
+                _ ->
+                    {ok, Msg}
+            end;
+        {error, _} = Error ->
+            Error
     end.
 
 from_basic_message(#basic_message{content = Content,
@@ -459,7 +483,8 @@ from_basic_message(#basic_message{content = Content,
                _ ->
                    #{id => Id}
            end,
-    message(Ex, RKey, prepare(read, Content), Anns, true).
+    {ok, Msg} = message(Ex, RKey, prepare(read, Content), Anns, true),
+    Msg.
 
 %% Internal
 

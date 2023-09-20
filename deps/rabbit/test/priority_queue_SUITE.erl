@@ -28,6 +28,7 @@ groups() ->
                          {overflow_reject_publish_dlx, [], [reject]},
                          dropwhile_fetchwhile,
                          info_head_message_timestamp,
+                         info_backing_queue_version,
                          unknown_info_key,
                          matching,
                          purge,
@@ -367,14 +368,14 @@ info_head_message_timestamp1(_Config) ->
     Content1 = #content{properties = #'P_basic'{priority = 1,
                                                 timestamp = 1000},
                         payload_fragments_rev = []},
-    Msg1 = mc_amqpl:message(ExName, <<>>, Content1, #{id => <<"msg1">>}),
+    {ok, Msg1} = mc_amqpl:message(ExName, <<>>, Content1, #{id => <<"msg1">>}),
     BQS2 = PQ:publish(Msg1, #message_properties{size = 0}, false, self(),
       noflow, BQS1),
     1000 = PQ:info(head_message_timestamp, BQS2),
     %% Publish a higher priority message with no timestamp.
     Content2 = #content{properties = #'P_basic'{priority = 2},
                         payload_fragments_rev = []},
-    Msg2 = mc_amqpl:message(ExName, <<>>, Content2, #{id => <<"msg2">>}),
+    {ok, Msg2} = mc_amqpl:message(ExName, <<>>, Content2, #{id => <<"msg2">>}),
     BQS3 = PQ:publish(Msg2, #message_properties{size = 0}, false, self(),
       noflow, BQS2),
     '' = PQ:info(head_message_timestamp, BQS3),
@@ -392,6 +393,27 @@ info_head_message_timestamp1(_Config) ->
     '' = PQ:info(head_message_timestamp, BQS6),
     PQ:delete_and_terminate(a_whim, BQS6),
     passed.
+
+info_backing_queue_version(Config) ->
+    {Conn, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+    Q1 = <<"info-priority-queue-v1">>,
+    Q2 = <<"info-priority-queue-v2">>,
+    declare(Ch, Q1, [{<<"x-max-priority">>, byte, 3},
+                    {<<"x-queue-version">>, byte, 1}]),
+    declare(Ch, Q2, [{<<"x-max-priority">>, byte, 3},
+                    {<<"x-queue-version">>, byte, 2}]),
+    try
+        {ok, [{backing_queue_status, BQS1}]} = info(Config, Q1, [backing_queue_status]),
+        1 = proplists:get_value(version, BQS1),
+        {ok, [{backing_queue_status, BQS2}]} = info(Config, Q2, [backing_queue_status]),
+        2 = proplists:get_value(version, BQS2)
+    after
+        delete(Ch, Q1),
+        delete(Ch, Q2),
+        rabbit_ct_client_helpers:close_channel(Ch),
+        rabbit_ct_client_helpers:close_connection(Conn),
+        passed
+    end.
 
 unknown_info_key(Config) ->
     {Conn, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),

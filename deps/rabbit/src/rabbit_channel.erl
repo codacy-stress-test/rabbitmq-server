@@ -930,15 +930,6 @@ handle_exception(Reason, State = #ch{cfg = #conf{protocol = Protocol,
             {stop, normal, State1}
     end.
 
--spec precondition_failed(string()) -> no_return().
-
-precondition_failed(Format) -> precondition_failed(Format, []).
-
--spec precondition_failed(string(), [any()]) -> no_return().
-
-precondition_failed(Format, Params) ->
-    rabbit_misc:protocol_error(precondition_failed, Format, Params).
-
 return_queue_declare_ok(#resource{name = ActualName},
                         NoWait, MessageCount, ConsumerCount,
                         #ch{cfg = Cfg} = State) ->
@@ -995,7 +986,7 @@ check_user_id_header(#'P_basic'{user_id = Claimed},
                                                   tags     = Tags}}}) ->
     case lists:member(impersonator, Tags) of
         true  -> ok;
-        false -> precondition_failed(
+        false -> rabbit_misc:precondition_failed(
                    "user_id property set to '~ts' but authenticated user was "
                    "'~ts'", [Claimed, Actual])
     end.
@@ -1003,7 +994,7 @@ check_user_id_header(#'P_basic'{user_id = Claimed},
 check_expiration_header(Props) ->
     case rabbit_basic:parse_expiration(Props) of
         {ok, _}    -> ok;
-        {error, E} -> precondition_failed("invalid expiration '~ts': ~tp",
+        {error, E} -> rabbit_misc:precondition_failed("invalid expiration '~ts': ~tp",
                                           [Props#'P_basic'.expiration, E])
     end.
 
@@ -1074,7 +1065,7 @@ check_msg_size(Content, MaxMessageSize, GCThreshold) ->
                 _ ->
                     "message size ~B is larger than configured max size ~B"
             end,
-            precondition_failed(ErrorMessage,
+            rabbit_misc:precondition_failed(ErrorMessage,
                                 [Size, MaxMessageSize]);
         _ -> ok
     end.
@@ -1082,7 +1073,7 @@ check_msg_size(Content, MaxMessageSize, GCThreshold) ->
 check_vhost_queue_limit(#resource{name = QueueName}, VHost) ->
   case rabbit_vhost_limit:is_over_queue_limit(VHost) of
     false         -> ok;
-    {true, Limit} -> precondition_failed("cannot declare queue '~ts': "
+    {true, Limit} -> rabbit_misc:precondition_failed("cannot declare queue '~ts': "
                                "queue limit in vhost '~ts' (~tp) is reached",
                                [QueueName, VHost, Limit])
 
@@ -1282,37 +1273,40 @@ handle_method(#'basic.publish'{exchange    = ExchangeNameBin,
     check_user_id_header(Props, State),
     check_expiration_header(Props),
     DoConfirm = Tx =/= none orelse ConfirmEnabled,
-    {DeliveryOptions, SeqNum, State1} =
+    {DeliveryOptions, State1} =
         case DoConfirm of
             false ->
-                {maps_put_truthy(flow, Flow, #{}), undefined, State0};
+                {maps_put_truthy(flow, Flow, #{mandatory => Mandatory}), State0};
             true  ->
                 rabbit_global_counters:messages_received_confirm(amqp091, 1),
                 SeqNo = State0#ch.publish_seqno,
-                Opts = maps_put_truthy(flow, Flow, #{correlation => SeqNo}),
-                {Opts, SeqNo, State0#ch{publish_seqno = SeqNo + 1}}
+                Opts = maps_put_truthy(flow, Flow, #{correlation => SeqNo, mandatory => Mandatory}),
+                {Opts, State0#ch{publish_seqno = SeqNo + 1}}
         end,
     % rabbit_feature_flags:is_enabled(message_containers),
-    Message0 = mc_amqpl:message(ExchangeName,
-                                RoutingKey,
-                                DecodedContent),
-    Message = rabbit_message_interceptor:intercept(Message0),
-    QNames = rabbit_exchange:route(Exchange, Message, #{return_binding_keys => true}),
-    [rabbit_channel:deliver_reply(RK, Message) ||
-     {virtual_reply_queue, RK} <- QNames],
-    Queues = rabbit_amqqueue:lookup_many(QNames),
-    ok = process_routing_mandatory(Mandatory, Queues, SeqNum, Message, ExchangeName, State0),
-    rabbit_trace:tap_in(Message, QNames, ConnName, ChannelNum,
-                        Username, TraceState),
-    %% TODO: call delivery_to_queues with plain args
-    Delivery = {Message, DeliveryOptions, Queues},
-    {noreply, case Tx of
-                  none ->
-                      deliver_to_queues(ExchangeName, Delivery, State1);
-                  {Msgs, Acks} ->
-                      Msgs1 = ?QUEUE:in(Delivery, Msgs),
-                      State1#ch{tx = {Msgs1, Acks}}
-              end};
+    case mc_amqpl:message(ExchangeName,
+                          RoutingKey,
+                          DecodedContent) of
+        {error, Reason}  ->
+            rabbit_misc:precondition_failed("invalid message: ~tp", [Reason]);
+        {ok, Message0} ->
+            Message = rabbit_message_interceptor:intercept(Message0),
+            QNames = rabbit_exchange:route(Exchange, Message, #{return_binding_keys => true}),
+            [rabbit_channel:deliver_reply(RK, Message) ||
+             {virtual_reply_queue, RK} <- QNames],
+            Queues = rabbit_amqqueue:lookup_many(QNames),
+            rabbit_trace:tap_in(Message, QNames, ConnName, ChannelNum,
+                                Username, TraceState),
+            %% TODO: call delivery_to_queues with plain args
+            Delivery = {Message, DeliveryOptions, Queues},
+            {noreply, case Tx of
+                          none ->
+                              deliver_to_queues(ExchangeName, Delivery, State1);
+                          {Msgs, Acks} ->
+                              Msgs1 = ?QUEUE:in(Delivery, Msgs),
+                              State1#ch{tx = {Msgs1, Acks}}
+                      end}
+    end;
 
 handle_method(#'basic.nack'{delivery_tag = DeliveryTag,
                             multiple     = Multiple,
@@ -1704,7 +1698,7 @@ handle_method(#'queue.purge'{nowait = NoWait} = Method,
     end;
 
 handle_method(#'tx.select'{}, _, #ch{confirm_enabled = true}) ->
-    precondition_failed("cannot switch from confirm to tx mode");
+    rabbit_misc:precondition_failed("cannot switch from confirm to tx mode");
 
 handle_method(#'tx.select'{}, _, State = #ch{tx = none}) ->
     {reply, #'tx.select_ok'{}, State#ch{tx = new_tx()}};
@@ -1713,7 +1707,7 @@ handle_method(#'tx.select'{}, _, State) ->
     {reply, #'tx.select_ok'{}, State};
 
 handle_method(#'tx.commit'{}, _, #ch{tx = none}) ->
-    precondition_failed("channel is not transactional");
+    rabbit_misc:precondition_failed("channel is not transactional");
 
 handle_method(#'tx.commit'{}, _, State = #ch{tx      = {Deliveries, Acks},
                                              limiter = Limiter}) ->
@@ -1731,7 +1725,7 @@ handle_method(#'tx.commit'{}, _, State = #ch{tx      = {Deliveries, Acks},
     {noreply, maybe_complete_tx(State3#ch{tx = committing})};
 
 handle_method(#'tx.rollback'{}, _, #ch{tx = none}) ->
-    precondition_failed("channel is not transactional");
+    rabbit_misc:precondition_failed("channel is not transactional");
 
 handle_method(#'tx.rollback'{}, _, State = #ch{unacked_message_q = UAMQ,
                                                tx = {_Msgs, Acks}}) ->
@@ -1741,7 +1735,7 @@ handle_method(#'tx.rollback'{}, _, State = #ch{unacked_message_q = UAMQ,
                                           tx                = new_tx()}};
 
 handle_method(#'confirm.select'{}, _, #ch{tx = {_, _}}) ->
-    precondition_failed("cannot switch from tx to confirm mode");
+    rabbit_misc:precondition_failed("cannot switch from tx to confirm mode");
 
 handle_method(#'confirm.select'{nowait = NoWait}, _, State) ->
     return_ok(State#ch{confirm_enabled = true},
@@ -1762,7 +1756,7 @@ handle_method(#'basic.credit'{consumer_tag = CTag,
         {ok, {Q, _CParams}} ->
             {ok, QStates, Actions} = rabbit_queue_type:credit(Q, CTag, Credit, Drain, QStates0),
             {noreply, handle_queue_actions(Actions, State#ch{queue_states = QStates})};
-        error -> precondition_failed(
+        error -> rabbit_misc:precondition_failed(
                    "unknown consumer tag '~ts'", [CTag])
     end;
 
@@ -2050,7 +2044,7 @@ collect_acks(AcknowledgedAcc, RemainingAcc, UAMQ, DeliveryTag, Multiple) ->
                                  UAMQTail, DeliveryTag, Multiple)
             end;
         {empty, _} ->
-            precondition_failed("unknown delivery tag ~w", [DeliveryTag])
+            rabbit_misc:precondition_failed("unknown delivery tag ~w", [DeliveryTag])
     end.
 
 %% Settles (acknowledges) messages at the queue replica process level.
@@ -2148,14 +2142,14 @@ notify_limiter(Limiter, Acked) ->
                  end
     end.
 
-deliver_to_queues({Message, _Options, _RoutedToQueues = []} = Delivery,
+deliver_to_queues({Message, _Options, _RoutedToQueues} = Delivery,
                   #ch{cfg = #conf{virtual_host = VHost}} = State) ->
     XNameBin = mc:get_annotation(exchange, Message),
     XName = rabbit_misc:r(VHost, exchange,  XNameBin),
     deliver_to_queues(XName, Delivery, State).
 
 deliver_to_queues(XName,
-                  {_Message, Options, _RoutedToQueues = []},
+                  {_Message, #{mandatory := false} = Options, _RoutedToQueues = []},
                   State)
   when not is_map_key(correlation, Options) -> %% optimisation when there are no queues
     ?INCR_STATS(exchange_stats, XName, 1, publish, State),
@@ -2163,8 +2157,9 @@ deliver_to_queues(XName,
     ?INCR_STATS(exchange_stats, XName, 1, drop_unroutable, State),
     State;
 deliver_to_queues(XName,
-                  {Message, Options, RoutedToQueues},
+                  {Message, Options0, RoutedToQueues},
                   State0 = #ch{queue_states = QueueStates0}) ->
+    {Mandatory, Options} = maps:take(mandatory, Options0),
     Qs = rabbit_amqqueue:prepend_extra_bcc(RoutedToQueues),
     case rabbit_queue_type:deliver(Qs, Message, Options, QueueStates0) of
         {ok, QueueStates, Actions} ->
@@ -2173,6 +2168,7 @@ deliver_to_queues(XName,
             MsgSeqNo = maps:get(correlation, Options, undefined),
             %% NB: the order here is important since basic.returns must be
             %% sent before confirms.
+            ok = process_routing_mandatory(Mandatory, RoutedToQueues, MsgSeqNo, Message, XName, State0),
             State1 = process_routing_confirm(MsgSeqNo, QueueNames, XName, State0),
             %% Actions must be processed after registering confirms as actions may
             %% contain rejections of publishes
@@ -2540,7 +2536,7 @@ handle_method(#'queue.declare'{queue       = QueueNameBin,
                undefined ->
                    ok;
                {error, {invalid_type, Type}} ->
-                    precondition_failed(
+                    rabbit_misc:precondition_failed(
                       "invalid type '~ts' for arg '~ts' in ~ts",
                       [Type, DlxKey, rabbit_misc:rs(QueueName)]);
                DLX ->
@@ -2605,35 +2601,7 @@ handle_method(#'queue.delete'{queue     = QueueNameBin,
     QueueName = qbin_to_resource(StrippedQueueNameBin, VHostPath),
 
     check_configure_permitted(QueueName, User, AuthzContext),
-    case rabbit_amqqueue:with(
-           QueueName,
-           fun (Q) ->
-                   rabbit_amqqueue:check_exclusive_access(Q, ConnPid),
-                   rabbit_queue_type:delete(Q, IfUnused, IfEmpty, Username)
-           end,
-           fun (not_found) ->
-                   {ok, 0};
-               ({absent, Q, crashed}) ->
-                   _ = rabbit_classic_queue:delete_crashed(Q, Username),
-                   {ok, 0};
-               ({absent, Q, stopped}) ->
-                   _ = rabbit_classic_queue:delete_crashed(Q, Username),
-                   {ok, 0};
-               ({absent, Q, Reason}) ->
-                   rabbit_amqqueue:absent(Q, Reason)
-           end) of
-        {error, in_use} ->
-            precondition_failed("~ts in use", [rabbit_misc:rs(QueueName)]);
-        {error, not_empty} ->
-            precondition_failed("~ts not empty", [rabbit_misc:rs(QueueName)]);
-        {error, {exit, _, _}} ->
-            %% rabbit_amqqueue:delete()/delegate:invoke might return {error, {exit, _, _}}
-            {ok, 0};
-        {ok, Count} ->
-            {ok, Count};
-        {protocol_error, Type, Reason, ReasonArgs} ->
-            rabbit_misc:protocol_error(Type, Reason, ReasonArgs)
-    end;
+    rabbit_amqqueue:delete_with(QueueName, ConnPid, IfUnused, IfEmpty, Username, true);
 handle_method(#'exchange.delete'{exchange  = ExchangeNameBin,
                                  if_unused = IfUnused},
               _ConnPid, AuthzContext, _CollectorPid, VHostPath,
@@ -2647,7 +2615,7 @@ handle_method(#'exchange.delete'{exchange  = ExchangeNameBin,
         {error, not_found} ->
             ok;
         {error, in_use} ->
-            precondition_failed("~ts in use", [rabbit_misc:rs(ExchangeName)]);
+            rabbit_misc:precondition_failed("~ts in use", [rabbit_misc:rs(ExchangeName)]);
         ok ->
             ok
     end;
@@ -2689,7 +2657,7 @@ handle_method(#'exchange.declare'{exchange    = ExchangeNameBin,
                 case rabbit_misc:r_arg(VHostPath, exchange, Args, AeKey) of
                     undefined -> ok;
                     {error, {invalid_type, Type}} ->
-                        precondition_failed(
+                        rabbit_misc:precondition_failed(
                           "invalid type '~ts' for arg '~ts' in ~ts",
                           [Type, AeKey, rabbit_misc:rs(ExchangeName)]);
                     AName     -> check_read_permitted(ExchangeName, User, AuthzContext),
