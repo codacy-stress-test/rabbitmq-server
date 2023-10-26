@@ -11,6 +11,7 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("rabbitmq_ct_helpers/include/rabbit_mgmt_test.hrl").
+-include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 
 -import(rabbit_ct_client_helpers, [close_connection/1, close_channel/1,
                                    open_unmanaged_connection/1]).
@@ -113,6 +114,7 @@ all_tests() -> [
     connections_channels_pagination_test,
     exchanges_pagination_test,
     exchanges_pagination_permissions_test,
+    queues_detailed_test,
     queue_pagination_test,
     queue_pagination_columns_test,
     queues_pagination_permissions_test,
@@ -125,6 +127,7 @@ all_tests() -> [
     get_fail_test,
     publish_test,
     publish_large_message_test,
+    publish_large_message_exceeding_http_request_body_size_test,
     publish_accept_json_test,
     publish_fail_test,
     publish_base64_test,
@@ -222,6 +225,13 @@ init_per_testcase(Testcase = disabled_qq_replica_opers_test, Config) ->
     rabbit_ct_broker_helpers:rpc_all(Config,
       application, set_env, [rabbitmq_management, restrictions, Restrictions]),
     rabbit_ct_helpers:testcase_started(Config, Testcase);
+init_per_testcase(queues_detailed_test, Config) ->
+    IsEnabled = rabbit_ct_broker_helpers:is_feature_flag_enabled(
+                  Config, detailed_queues_endpoint),
+    case IsEnabled of
+        true  -> Config;
+        false -> {skip, "The detailed queues endpoint is not available."}
+    end;
 init_per_testcase(Testcase, Config) ->
     rabbit_ct_broker_helpers:close_all_connections(Config, 0, <<"rabbit_mgmt_SUITE:init_per_testcase">>),
     rabbit_ct_helpers:testcase_started(Config, Testcase).
@@ -359,7 +369,7 @@ ets_tables_memory_test(Config) ->
     Path = "/nodes/" ++ binary_to_list(maps:get(name, Node)) ++ "/memory/ets",
     Result = http_get(Config, Path, ?OK),
     assert_keys([ets_tables_memory], Result),
-    NonMgmtKeys = [rabbit_vhost,rabbit_user_permission],
+    NonMgmtKeys = [tracked_connection, tracked_channel],
     Keys = [queue_stats, vhost_stats_coarse_conn_stats,
         connection_created_stats, channel_process_stats, consumer_stats,
         queue_msg_rates],
@@ -1031,6 +1041,10 @@ queues_test(Config) ->
              ?BAD_REQUEST),
 
     http_put(Config, "/queues/%2F/baz", Good, {group, '2xx'}),
+    %% Wait until metrics are emitted and stats collected
+    ?awaitMatch(true, maps:is_key(storage_version,
+                                  http_get(Config, "/queues/%2F/baz")),
+                30000),
     Queues = http_get(Config, "/queues/%2F"),
     Queue = http_get(Config, "/queues/%2F/foo"),
     assert_list([#{name        => <<"baz">>,
@@ -1038,19 +1052,22 @@ queues_test(Config) ->
                    durable     => true,
                    auto_delete => false,
                    exclusive   => false,
-                   arguments   => #{}},
+                   arguments   => #{},
+                   storage_version => 2},
                  #{name        => <<"foo">>,
                    vhost       => <<"/">>,
                    durable     => true,
                    auto_delete => false,
                    exclusive   => false,
-                   arguments   => #{}}], Queues),
+                   arguments   => #{},
+                   storage_version => 2}], Queues),
     assert_item(#{name        => <<"foo">>,
                   vhost       => <<"/">>,
                   durable     => true,
                   auto_delete => false,
                   exclusive   => false,
-                  arguments   => #{}}, Queue),
+                  arguments   => #{},
+                  storage_version => 2}, Queue),
 
     http_delete(Config, "/queues/%2F/foo", {group, '2xx'}),
     http_delete(Config, "/queues/%2F/baz", {group, '2xx'}),
@@ -1993,9 +2010,7 @@ queue_purge_test(Config) ->
     http_delete(Config, "/queues/%2F/myqueue/contents", {group, '2xx'}),
     http_delete(Config, "/queues/%2F/badqueue/contents", ?NOT_FOUND),
     http_delete(Config, "/queues/%2F/exclusive/contents", ?BAD_REQUEST),
-    http_delete(Config, "/queues/%2F/exclusive", ?BAD_REQUEST),
-    #'basic.get_empty'{} =
-        amqp_channel:call(Ch, #'basic.get'{queue = <<"myqueue">>}),
+    http_delete(Config, "/queues/%2F/exclusive", {group, '2xx'}),
     close_channel(Ch),
     close_connection(Conn),
     http_delete(Config, "/queues/%2F/myqueue", {group, '2xx'}),
@@ -2203,8 +2218,8 @@ queue_pagination_test(Config) ->
     ?assertEqual(1, maps:get(page, PageOfTwo)),
     ?assertEqual(2, maps:get(page_size, PageOfTwo)),
     ?assertEqual(2, maps:get(page_count, PageOfTwo)),
-    assert_list([#{name => <<"test0">>, vhost => <<"/">>},
-                 #{name => <<"test2_reg">>, vhost => <<"/">>}
+    assert_list([#{name => <<"test0">>, vhost => <<"/">>, storage_version => 2},
+                 #{name => <<"test2_reg">>, vhost => <<"/">>, storage_version => 2}
                 ], maps:get(items, PageOfTwo)),
 
     SortedByName = http_get(Config, "/queues?sort=name&page=1&page_size=2", ?OK),
@@ -2231,8 +2246,18 @@ queue_pagination_test(Config) ->
                  #{name => <<"test2_reg">>, vhost => <<"/">>},
                  #{name => <<"reg_test3">>, vhost =><<"vh1">>}
                 ], maps:get(items, FirstPage)),
-
-
+    %% The reduced API version just has the most useful fields.
+    %% garbage_collection is not one of them
+    IsEnabled = rabbit_ct_broker_helpers:is_feature_flag_enabled(
+                  Config, detailed_queues_endpoint),
+    case IsEnabled of
+        true  ->
+            [?assertNot(maps:is_key(garbage_collection, Item)) ||
+                Item <- maps:get(items, FirstPage)];
+        false ->
+            [?assert(maps:is_key(garbage_collection, Item)) ||
+                Item <- maps:get(items, FirstPage)]
+    end,
     ReverseSortedByName = http_get(Config,
                                    "/queues?page=2&page_size=2&sort=name&sort_reverse=true",
                                    ?OK),
@@ -2331,12 +2356,61 @@ queue_pagination_columns_test(Config) ->
           vhost => <<"vh1">>}
     ], maps:get(items, ColumnsNameVhost)),
 
+    ?awaitMatch(
+       true,
+       begin
+           ColumnsGarbageCollection = http_get(Config, "/queues?columns=name,garbage_collection&page=2&page_size=2", ?OK),
+           %% The reduced API version just has the most useful fields,
+           %% but we can still query any info item using `columns`
+           lists:all(fun(Item) ->
+                             maps:is_key(garbage_collection, Item)
+                     end,
+                     maps:get(items, ColumnsGarbageCollection))
+       end, 30000),
 
     http_delete(Config, "/queues/%2F/queue_a", {group, '2xx'}),
     http_delete(Config, "/queues/vh1/queue_b", {group, '2xx'}),
     http_delete(Config, "/queues/%2F/queue_c", {group, '2xx'}),
     http_delete(Config, "/queues/vh1/queue_d", {group, '2xx'}),
     http_delete(Config, "/vhosts/vh1", {group, '2xx'}),
+    passed.
+
+queues_detailed_test(Config) ->
+    QArgs = #{},
+    http_put(Config, "/queues/%2F/queue_a", QArgs, {group, '2xx'}),
+    http_put(Config, "/queues/%2F/queue_c", QArgs, {group, '2xx'}),
+
+    ?awaitMatch(
+       true,
+       begin
+           Detailed = http_get(Config, "/queues/detailed", ?OK),
+           lists:all(fun(Item) ->
+                             maps:is_key(garbage_collection, Item)
+                     end, Detailed)
+       end, 30000),
+
+    Detailed = http_get(Config, "/queues/detailed", ?OK),
+    ?assertNot(lists:any(fun(Item) ->
+                                 maps:is_key(backing_queue_status, Item)
+                         end, Detailed)),
+    %% It's null
+    ?assert(lists:any(fun(Item) ->
+                              maps:is_key(single_active_consumer_tag, Item)
+                      end, Detailed)),
+
+    Reduced = http_get(Config, "/queues", ?OK),
+    ?assertNot(lists:any(fun(Item) ->
+                                 maps:is_key(garbage_collection, Item)
+                         end, Reduced)),
+    ?assertNot(lists:any(fun(Item) ->
+                                 maps:is_key(backing_queue_status, Item)
+                         end, Reduced)),
+    ?assertNot(lists:any(fun(Item) ->
+                                 maps:is_key(single_active_consumer_tag, Item)
+                         end, Reduced)),
+
+    http_delete(Config, "/queues/%2F/queue_a", {group, '2xx'}),
+    http_delete(Config, "/queues/%2F/queue_c", {group, '2xx'}),
     passed.
 
 queues_pagination_permissions_test(Config) ->
@@ -2638,7 +2712,7 @@ get_fail_test(Config) ->
     passed.
 
 
--define(LARGE_BODY_BYTES, 25000000).
+-define(LARGE_BODY_BYTES, 5000000).
 
 publish_test(Config) ->
     Headers = #{'x-forwarding' => [#{uri => <<"amqp://localhost/%2F/upstream">>}]},
@@ -2679,6 +2753,19 @@ publish_large_message_test(Config) ->
                                   {encoding, auto}], ?OK),
   assert_item(Msg, Msg3),
   http_delete(Config, "/queues/%2F/publish_accept_json_test", {group, '2xx'}),
+  passed.
+
+-define(EXCESSIVELY_LARGE_BODY_BYTES, 35000000).
+
+publish_large_message_exceeding_http_request_body_size_test(Config) ->
+  Headers = #{'x-forwarding' => [#{uri => <<"amqp://localhost/%2F/upstream">>}]},
+  Body = binary:copy(<<"a">>, ?EXCESSIVELY_LARGE_BODY_BYTES),
+  Msg = msg(<<"large_message_exceeding_http_request_body_size_test">>, Headers, Body),
+  http_put(Config, "/queues/%2F/large_message_exceeding_http_request_body_size_test", #{}, {group, '2xx'}),
+  %% exceeds the default HTTP API request body size limit
+  http_post_accept_json(Config, "/exchanges/%2F/amq.default/publish",
+                                     Msg, ?BAD_REQUEST),
+  http_delete(Config, "/queues/%2F/large_message_exceeding_http_request_body_size_test", {group, '2xx'}),
   passed.
 
 publish_accept_json_test(Config) ->
@@ -2943,7 +3030,7 @@ policy_permissions_test(Config) ->
     http_put(Config, "/permissions/v/mgmt",   Perms, {group, '2xx'}),
 
     Policy = [{pattern,    <<".*">>},
-              {definition, [{<<"ha-mode">>, <<"all">>}]}],
+              {definition, [{<<"max-length-bytes">>, 3000000}]}],
     Param = [{value, <<"">>}],
 
     http_put(Config, "/policies/%2F/HA", Policy, {group, '2xx'}),

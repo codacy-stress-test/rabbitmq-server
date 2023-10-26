@@ -52,7 +52,8 @@
 -define(RESPONSE_CODE_PRECONDITION_FAILED, 17).
 -define(RESPONSE_CODE_PUBLISHER_DOES_NOT_EXIST, 18).
 -define(RESPONSE_CODE_NO_OFFSET, 19).
-
+-define(RESPONSE_SASL_CANNOT_CHANGE_MECHANISM, 20).
+-define(RESPONSE_SASL_CANNOT_CHANGE_USERNAME, 21).
 
 -define(OFFSET_TYPE_NONE, 0).
 -define(OFFSET_TYPE_FIRST, 1).
@@ -70,6 +71,8 @@
 
 -define(INFO_ITEMS,
   [conn_name,
+    pid,
+    node,
     port,
     peer_port,
     host,
@@ -95,6 +98,7 @@
 
 -define(CONSUMER_INFO_ITEMS, [
   connection_pid,
+  node,
   subscription_id,
   stream,
   messages_consumed,
@@ -108,6 +112,7 @@
 
 -define(PUBLISHER_INFO_ITEMS, [
   connection_pid,
+  node,
   publisher_id,
   stream,
   reference,

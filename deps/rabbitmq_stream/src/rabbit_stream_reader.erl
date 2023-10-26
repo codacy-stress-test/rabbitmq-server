@@ -84,7 +84,7 @@
          heartbeat :: undefined | integer(),
          heartbeater :: any(),
          client_properties = #{} :: #{binary() => binary()},
-         monitors = #{} :: #{reference() => stream()},
+         monitors = #{} :: #{reference() => {pid(), stream()}},
          stats_timer :: undefined | rabbit_event:state(),
          resource_alarm :: boolean(),
          send_file_oct ::
@@ -912,10 +912,10 @@ open(info, {'DOWN', MonitorRef, process, _OsirisPid, _Reason},
          StatemData) ->
     {Connection1, State1} =
         case Monitors of
-            #{MonitorRef := Stream} ->
+            #{MonitorRef := {MemberPid, Stream}} ->
                 Monitors1 = maps:remove(MonitorRef, Monitors),
                 C = Connection#stream_connection{monitors = Monitors1},
-                case clean_state_after_stream_deletion_or_failure(Stream, C,
+                case clean_state_after_stream_deletion_or_failure(MemberPid, Stream, C,
                                                                   State)
                 of
                     {cleaned, NewConnection, NewState} ->
@@ -1461,8 +1461,7 @@ handle_frame_pre_auth(Transport,
                                                                   [Username]),
                                     {C1#stream_connection{connection_step =
                                                               failure},
-                                     {sasl_authenticate,
-                                      ?RESPONSE_SASL_AUTHENTICATION_FAILURE_LOOPBACK,
+                                     {sasl_authenticate, ?RESPONSE_SASL_AUTHENTICATION_FAILURE_LOOPBACK,
                                       <<>>}}
                             end
                     end,
@@ -1643,6 +1642,100 @@ handle_frame_post_auth(Transport,
     rabbit_global_counters:increase_protocol_counter(stream,
                                                      ?PRECONDITION_FAILED, 1),
     {Connection0, State};
+
+handle_frame_post_auth(Transport,
+                       #stream_connection{user = #user{username = Username} = _User,
+                                          socket = S,
+                                          host = Host,
+                                          auth_mechanism = Auth_Mechanism,
+                                          authentication_state = AuthState,
+                                          resource_alarm = false} =
+                           C1,
+                       State,
+                       {request, CorrelationId,
+                        {sasl_authenticate, NewMechanism, NewSaslBin}}) ->
+    rabbit_log:debug("Open frame received sasl_authenticate for username '~ts'", [Username]),
+
+    Connection1 =
+      case Auth_Mechanism of
+        {NewMechanism, AuthMechanism} -> %% Mechanism is the same used during the pre-auth phase
+              {C2, CmdBody} =
+                  case AuthMechanism:handle_response(NewSaslBin, AuthState) of
+                      {refused, NewUsername, Msg, Args} ->
+                          rabbit_core_metrics:auth_attempt_failed(Host,
+                                                                  NewUsername,
+                                                                  stream),
+                          auth_fail(NewUsername, Msg, Args, C1, State),
+                          rabbit_log_connection:warning(Msg, Args),
+                          {C1#stream_connection{connection_step = failure},
+                           {sasl_authenticate,
+                            ?RESPONSE_AUTHENTICATION_FAILURE, <<>>}};
+                      {protocol_error, Msg, Args} ->
+                          rabbit_core_metrics:auth_attempt_failed(Host,
+                                                                  <<>>,
+                                                                  stream),
+                          notify_auth_result(none,
+                                             user_authentication_failure,
+                                             [{error,
+                                               rabbit_misc:format(Msg,
+                                                                  Args)}],
+                                             C1,
+                                             State),
+                          rabbit_log_connection:warning(Msg, Args),
+                          {C1#stream_connection{connection_step = failure},
+                           {sasl_authenticate, ?RESPONSE_SASL_ERROR, <<>>}};
+                      {challenge, Challenge, AuthState1} ->
+                          {C1#stream_connection{authentication_state = AuthState1,
+                                                connection_step = authenticating},
+                           {sasl_authenticate, ?RESPONSE_SASL_CHALLENGE,
+                            Challenge}};
+                      {ok, NewUser = #user{username = NewUsername}} ->
+                          case NewUsername of
+                            Username ->
+                                  rabbit_core_metrics:auth_attempt_succeeded(Host,
+                                                                             Username,
+                                                                             stream),
+                                  notify_auth_result(Username,
+                                                     user_authentication_success,
+                                                     [],
+                                                     C1,
+                                                     State),
+                                  rabbit_log:debug("Successfully updated secret for username '~ts'", [Username]),
+                                  {C1#stream_connection{user = NewUser,
+                                                        authentication_state = done,
+                                                        connection_step = authenticated},
+                                   {sasl_authenticate, ?RESPONSE_CODE_OK,
+                                    <<>>}};
+                              _ ->
+                                  rabbit_core_metrics:auth_attempt_failed(Host,
+                                                                          Username,
+                                                                          stream),
+                                  rabbit_log_connection:warning("Not allowed to change username '~ts'. Only password",
+                                                                [Username]),
+                                  {C1#stream_connection{connection_step =
+                                                            failure},
+                                   {sasl_authenticate,
+                                    ?RESPONSE_SASL_CANNOT_CHANGE_USERNAME,
+                                    <<>>}}
+                          end
+                  end,
+              Frame =
+                  rabbit_stream_core:frame({response, CorrelationId,
+                                            CmdBody}),
+              send(Transport, S, Frame),
+              C2;
+        {OtherMechanism, _} ->
+              rabbit_log_connection:warning("User '~ts' cannot change initial auth mechanism '~ts' for '~ts'",
+                                              [Username, NewMechanism, OtherMechanism]),
+              CmdBody =
+                {sasl_authenticate, ?RESPONSE_SASL_CANNOT_CHANGE_MECHANISM, <<>>},
+              Frame = rabbit_stream_core:frame({response, CorrelationId, CmdBody}),
+              send(Transport, S, Frame),
+              C1#stream_connection{connection_step = failure}
+      end,
+
+    {Connection1, State};
+
 handle_frame_post_auth(Transport,
                        #stream_connection{user = User,
                                           publishers = Publishers0,
@@ -1893,7 +1986,7 @@ handle_frame_post_auth(Transport,
                        {request, CorrelationId,
                         {delete_publisher, PublisherId}}) ->
     case Publishers of
-        #{PublisherId := #publisher{stream = Stream, reference = Ref}} ->
+        #{PublisherId := #publisher{stream = Stream, reference = Ref, leader = LeaderPid}} ->
             Connection1 =
                 Connection0#stream_connection{publishers =
                                                   maps:remove(PublisherId,
@@ -1902,7 +1995,7 @@ handle_frame_post_auth(Transport,
                                                   maps:remove({Stream, Ref},
                                                               PubToIds)},
             Connection2 =
-                maybe_clean_connection_from_stream(Stream, Connection1),
+                maybe_clean_connection_from_stream(LeaderPid, Stream, Connection1),
             response(Transport,
                      Connection1,
                      delete_publisher,
@@ -2418,7 +2511,7 @@ handle_frame_post_auth(Transport,
                                 CorrelationId),
                     {Connection1, State1} =
                         case
-                            clean_state_after_stream_deletion_or_failure(Stream,
+                            clean_state_after_stream_deletion_or_failure(undefined, Stream,
                                                                          Connection,
                                                                          State)
                         of
@@ -3155,7 +3248,7 @@ stream_r(Stream, #stream_connection{virtual_host = VHost}) ->
               kind = queue,
               virtual_host = VHost}.
 
-clean_state_after_stream_deletion_or_failure(Stream,
+clean_state_after_stream_deletion_or_failure(MemberPid, Stream,
                                              #stream_connection{virtual_host =
                                                                     VirtualHost,
                                                                 stream_subscriptions
@@ -3180,16 +3273,30 @@ clean_state_after_stream_deletion_or_failure(Stream,
                 #{Stream := SubscriptionIds} = StreamSubscriptions,
                 Requests1 = lists:foldl(
                               fun(SubId, Rqsts0) ->
-                                      rabbit_stream_metrics:consumer_cancelled(self(),
-                                                                               stream_r(Stream,
-                                                                                        C0),
-                                                                               SubId),
                                       #{SubId := Consumer} = Consumers,
-                                      Rqsts1 = maybe_unregister_consumer(
-                                                 VirtualHost, Consumer,
-                                                 single_active_consumer(Consumer),
-                                                 Rqsts0),
-                                      Rqsts1
+                                      case {MemberPid, Consumer} of
+                                          {undefined, _C} ->
+                                              rabbit_stream_metrics:consumer_cancelled(self(),
+                                                                                       stream_r(Stream,
+                                                                                                C0),
+                                                                                       SubId),
+                                              maybe_unregister_consumer(
+                                                VirtualHost, Consumer,
+                                                single_active_consumer(Consumer),
+                                                Rqsts0);
+                                          {MemberPid, #consumer{configuration =
+                                                                #consumer_configuration{member_pid = MemberPid}}} ->
+                                              rabbit_stream_metrics:consumer_cancelled(self(),
+                                                                                       stream_r(Stream,
+                                                                                                C0),
+                                                                                       SubId),
+                                              maybe_unregister_consumer(
+                                                VirtualHost, Consumer,
+                                                single_active_consumer(Consumer),
+                                                Rqsts0);
+                                          _ ->
+                                              Rqsts0
+                                      end
                               end, Requests0, SubscriptionIds),
                 {true,
                  C0#stream_connection{stream_subscriptions =
@@ -3208,17 +3315,25 @@ clean_state_after_stream_deletion_or_failure(Stream,
                 {PurgedPubs, PurgedPubToIds} =
                     maps:fold(fun(PubId,
                                   #publisher{stream = S, reference = Ref},
-                                  {Pubs, PubToIds}) ->
-                                 case S of
-                                     Stream ->
-                                         rabbit_stream_metrics:publisher_deleted(self(),
-                                                                                 stream_r(S,
+                                  {Pubs, PubToIds}) when S =:= Stream andalso MemberPid =:= undefined ->
+                                      rabbit_stream_metrics:publisher_deleted(self(),
+                                                                                 stream_r(Stream,
                                                                                           C1),
                                                                                  PubId),
                                          {maps:remove(PubId, Pubs),
                                           maps:remove({Stream, Ref}, PubToIds)};
-                                     _ -> {Pubs, PubToIds}
-                                 end
+                                 (PubId,
+                                  #publisher{stream = S, reference = Ref, leader = MPid},
+                                  {Pubs, PubToIds}) when S =:= Stream andalso MPid =:= MemberPid ->
+                                         rabbit_stream_metrics:publisher_deleted(self(),
+                                                                                 stream_r(Stream,
+                                                                                          C1),
+                                                                                 PubId),
+                                         {maps:remove(PubId, Pubs),
+                                          maps:remove({Stream, Ref}, PubToIds)};
+
+                                 (_PubId, _Publisher, {Pubs, PubToIds}) ->
+                                     {Pubs, PubToIds}
                               end,
                               {Publishers, PublisherToIds}, Publishers),
                 {true,
@@ -3240,7 +3355,7 @@ clean_state_after_stream_deletion_or_failure(Stream,
          orelse LeadersCleaned
     of
         true ->
-            C3 = demonitor_stream(Stream, C2),
+            C3 = demonitor_stream(MemberPid, Stream, C2),
             {cleaned, C3#stream_connection{stream_leaders = Leaders1}, S2};
         false ->
             {not_cleaned, C2#stream_connection{stream_leaders = Leaders1}, S2}
@@ -3279,7 +3394,7 @@ remove_subscription(SubscriptionId,
                     #stream_connection_state{consumers = Consumers} = State) ->
     #{SubscriptionId := Consumer} = Consumers,
     #consumer{log = Log,
-              configuration = #consumer_configuration{stream = Stream}} =
+              configuration = #consumer_configuration{stream = Stream, member_pid = MemberPid}} =
         Consumer,
     rabbit_log:debug("Deleting subscription ~tp (stream ~tp)",
                      [SubscriptionId, Stream]),
@@ -3299,7 +3414,7 @@ remove_subscription(SubscriptionId,
         Connection#stream_connection{stream_subscriptions =
                                          StreamSubscriptions1},
     Consumers1 = maps:remove(SubscriptionId, Consumers),
-    Connection2 = maybe_clean_connection_from_stream(Stream, Connection1),
+    Connection2 = maybe_clean_connection_from_stream(MemberPid, Stream, Connection1),
     rabbit_stream_metrics:consumer_cancelled(self(),
                                              stream_r(Stream, Connection2),
                                              SubscriptionId),
@@ -3312,7 +3427,7 @@ remove_subscription(SubscriptionId,
     {Connection2#stream_connection{outstanding_requests = Requests1},
      State#stream_connection_state{consumers = Consumers1}}.
 
-maybe_clean_connection_from_stream(Stream,
+maybe_clean_connection_from_stream(MemberPid, Stream,
                                    #stream_connection{stream_leaders =
                                                           Leaders} =
                                        Connection0) ->
@@ -3321,7 +3436,7 @@ maybe_clean_connection_from_stream(Stream,
               stream_has_subscriptions(Stream, Connection0)}
         of
             {false, false} ->
-                demonitor_stream(Stream, Connection0);
+                demonitor_stream(MemberPid, Stream, Connection0);
             _ ->
                 Connection0
         end,
@@ -3330,26 +3445,27 @@ maybe_clean_connection_from_stream(Stream,
 
 maybe_monitor_stream(Pid, Stream,
                      #stream_connection{monitors = Monitors} = Connection) ->
-    case lists:member(Stream, maps:values(Monitors)) of
+    case lists:member({Pid, Stream}, maps:values(Monitors)) of
         true ->
             Connection;
         false ->
             MonitorRef = monitor(process, Pid),
             Connection#stream_connection{monitors =
-                                             maps:put(MonitorRef, Stream,
+                                             maps:put(MonitorRef, {Pid, Stream},
                                                       Monitors)}
     end.
 
-demonitor_stream(Stream,
+demonitor_stream(MemberPid, Stream,
                  #stream_connection{monitors = Monitors0} = Connection) ->
     Monitors =
-        maps:fold(fun(MonitorRef, Strm, Acc) ->
-                     case Strm of
-                         Stream ->
-                             demonitor(MonitorRef, [flush]),
+        maps:fold(fun(MonitorRef, {MPid, Strm}, Acc) when MPid =:= MemberPid andalso Strm =:= Stream ->
+                        demonitor(MonitorRef, [flush]),
                              Acc;
-                         _ -> maps:put(MonitorRef, Strm, Acc)
-                     end
+                     (MonitorRef, {_MPid, Strm}, Acc) when MemberPid =:= undefined andalso Strm =:= Stream ->
+                        demonitor(MonitorRef, [flush]),
+                             Acc;
+                     (MonitorRef, {MPid, Strm}, Acc) ->
+                         maps:put(MonitorRef, {MPid, Strm}, Acc)
                   end,
                   #{}, Monitors0),
     Connection#stream_connection{monitors = Monitors}.
@@ -3665,6 +3781,8 @@ consumer_i(offset_lag,
     stream_stored_offset(Log) - consumer_offset(Counters);
 consumer_i(connection_pid, _) ->
     self();
+consumer_i(node, _) ->
+    node();
 consumer_i(properties,
            #consumer{configuration =
                          #consumer_configuration{properties = Properties}}) ->
@@ -3697,6 +3815,8 @@ publisher_i(stream, #publisher{stream = S}) ->
     S;
 publisher_i(connection_pid, _) ->
     self();
+publisher_i(node, _) ->
+    node();
 publisher_i(publisher_id, #publisher{publisher_id = Id}) ->
     Id;
 publisher_i(reference, #publisher{reference = undefined}) ->
@@ -3839,4 +3959,3 @@ stream_from_consumers(SubId, Consumers) ->
         _ ->
             undefined
     end.
-

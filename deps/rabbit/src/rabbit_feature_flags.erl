@@ -122,6 +122,7 @@
          read_enabled_feature_flags_list/0,
          copy_feature_states_after_reset/1,
          uses_callbacks/1,
+         reset/0,
          reset_registry/0]).
 
 -ifdef(TEST).
@@ -227,7 +228,7 @@
 %% It is called when a feature flag is being enabled. The function is
 %% responsible for this feature-flag-specific verification and data
 %% conversion. It returns `ok' if RabbitMQ can mark the feature flag as
-%% enabled an continue with the next one, if any. `{error, Reason}' and
+%% enabled and continue with the next one, if any. `{error, Reason}' and
 %% exceptions are an error and the feature flag will remain disabled.
 %%
 %% The migration function is called on all nodes which fulfill the following
@@ -1129,7 +1130,7 @@ do_write_enabled_feature_flags_list(EnabledFeatureNames) ->
     EnabledFeatureNames1 = lists:sort(EnabledFeatureNames),
 
     File = enabled_feature_flags_list_file(),
-    Content = io_lib:format("~tp.~n", [EnabledFeatureNames1]),
+    Content = io_lib:format("~1tp.~n", [EnabledFeatureNames1]),
     %% TODO: If we fail to write the the file, we should spawn a process
     %% to retry the operation.
     case file:write_file(File, Content) of
@@ -1142,6 +1143,18 @@ do_write_enabled_feature_flags_list(EnabledFeatureNames) ->
               [File, file:format_error(Reason)],
               #{domain => ?RMQLOG_DOMAIN_FEAT_FLAGS}),
             Error
+    end.
+
+-spec delete_enabled_feature_flags_list_file() -> Ret when
+      Ret :: ok | {error, file:posix() | badarg}.
+%% @private
+
+delete_enabled_feature_flags_list_file() ->
+    File = enabled_feature_flags_list_file(),
+    case file:delete(File) of
+        ok              -> ok;
+        {error, enoent} -> ok;
+        Error           -> Error
     end.
 
 -spec enabled_feature_flags_list_file() -> file:filename().
@@ -1321,6 +1334,14 @@ sync_feature_flags_with_cluster(Nodes, _NodeIsVirgin) ->
 
 refresh_feature_flags_after_app_load() ->
     rabbit_ff_controller:refresh_after_app_load().
+
+-spec reset() -> ok.
+%% @doc Resets the feature flags registry and recorded states on disk.
+
+reset() ->
+    ok = reset_registry(),
+    ok = delete_enabled_feature_flags_list_file(),
+    ok.
 
 -spec reset_registry() -> ok.
 %% @doc Resets the feature flags registry.

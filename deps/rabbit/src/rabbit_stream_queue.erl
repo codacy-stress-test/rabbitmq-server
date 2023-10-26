@@ -251,6 +251,8 @@ consume(Q, Spec,
               args := Args,
               ok_msg := OkMsg} = Spec,
             QName = amqqueue:get_name(Q),
+            rabbit_log:debug("~s:~s Local pid resolved ~0p",
+                             [?MODULE, ?FUNCTION_NAME, LocalPid]),
             case parse_offset_arg(
                    rabbit_misc:table_lookup(Args, <<"x-stream-offset">>)) of
                 {error, _} = Err ->
@@ -340,12 +342,20 @@ filter_spec(Args) ->
 
 get_local_pid(#stream_client{local_pid = Pid} = State)
   when is_pid(Pid) ->
-    {Pid, State};
+    case erlang:is_process_alive(Pid) of
+        true ->
+            {Pid, State};
+        false ->
+            query_local_pid(State)
+    end;
 get_local_pid(#stream_client{leader = Pid} = State)
   when is_pid(Pid) andalso node(Pid) == node() ->
-    {Pid, State#stream_client{local_pid = Pid}};
-get_local_pid(#stream_client{stream_id = StreamId} = State) ->
+    get_local_pid(State#stream_client{local_pid = Pid});
+get_local_pid(#stream_client{} = State) ->
     %% query local coordinator to get pid
+    query_local_pid(State).
+
+query_local_pid(#stream_client{stream_id = StreamId} = State) ->
     case rabbit_stream_coordinator:local_pid(StreamId) of
         {ok, Pid} ->
             {Pid, State#stream_client{local_pid = Pid}};
@@ -555,9 +565,10 @@ recover(_VHost, Queues) ->
               {[Q | R0], F0}
       end, {[], []}, Queues).
 
-settle(QName, complete, CTag, MsgIds, #stream_client{readers = Readers0,
+settle(QName, _, CTag, MsgIds, #stream_client{readers = Readers0,
                                                      local_pid = LocalPid,
                                                      name = Name} = State) ->
+    %% all settle reasons will "give credit" to the stream queue
     Credit = length(MsgIds),
     {Readers, Msgs} = case Readers0 of
                           #{CTag := #stream{credit = Credit0} = Str0} ->
@@ -567,11 +578,7 @@ settle(QName, complete, CTag, MsgIds, #stream_client{readers = Readers0,
                           _ ->
                               {Readers0, []}
                       end,
-    {State#stream_client{readers = Readers}, [{deliver, CTag, true, Msgs}]};
-settle(_, _, _, _, #stream_client{name = Name}) ->
-    {protocol_error, not_implemented,
-     "basic.nack and basic.reject not supported by stream queues ~ts",
-     [rabbit_misc:rs(Name)]}.
+    {State#stream_client{readers = Readers}, [{deliver, CTag, true, Msgs}]}.
 
 info(Q, all_keys) ->
     info(Q, ?INFO_KEYS);
@@ -1090,7 +1097,7 @@ capabilities() ->
                                <<"ha-promote-on-shutdown">>, <<"ha-promote-on-failure">>,
                                <<"queue-master-locator">>,
                                %% Quorum policies
-                               <<"dead-letter-strategy">>],
+                               <<"dead-letter-strategy">>, <<"target-group-size">>],
       queue_arguments => [<<"x-max-length-bytes">>, <<"x-queue-type">>,
                           <<"x-max-age">>, <<"x-stream-max-segment-size-bytes">>,
                           <<"x-initial-cluster-size">>, <<"x-queue-leader-locator">>],
@@ -1119,6 +1126,7 @@ resend_all(#stream_client{leader = LeaderPid,
     State.
 
 set_leader_pid(Pid, QName) ->
+    %% TODO this should probably be a single khepri transaction for better performance.
     Fun = fun (Q) ->
                   amqqueue:set_pid(Q, Pid)
           end,

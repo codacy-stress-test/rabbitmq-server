@@ -28,8 +28,6 @@ defmodule RabbitMQ.CLI.Ctl.Commands.JoinClusterCommand do
   def validate([_], _), do: :ok
   def validate(_, _), do: {:validation_failure, :too_many_args}
 
-  use RabbitMQ.CLI.Core.RequiresRabbitAppStopped
-
   def run([target_node], %{node: node_name, ram: ram, disc: disc} = opts) do
     node_type =
       case {ram, disc} do
@@ -76,6 +74,21 @@ defmodule RabbitMQ.CLI.Ctl.Commands.JoinClusterCommand do
   def output({:error, :cannot_cluster_node_with_itself}, %{node: node_name}) do
     {:error, RabbitMQ.CLI.Core.ExitCodes.exit_software(),
      "Error: cannot cluster node with itself: #{node_name}"}
+  end
+
+  def output({:error, {:node_type_unsupported, db, node_type}}, %{node: node_name}) do
+    {:error, RabbitMQ.CLI.Core.ExitCodes.exit_software(),
+     "Error: `#{node_type}` node type is unsupported by the #{db} by database engine"}
+  end
+
+  def output(
+        {:error,
+         {:khepri_mnesia_migration_ex, :all_mnesia_nodes_must_run,
+          %{all_nodes: nodes, running_nodes: running}}},
+        _opts
+      ) do
+    {:error, RabbitMQ.CLI.Core.ExitCodes.exit_software(),
+     "Error: all mnesia nodes must run to join the cluster, mnesia nodes: #{inspect(nodes)}, running nodes: #{inspect(running)}"}
   end
 
   use RabbitMQ.CLI.DefaultOutput

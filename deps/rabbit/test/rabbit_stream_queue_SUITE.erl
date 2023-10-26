@@ -283,6 +283,14 @@ init_per_testcase(TestCase, Config)
         _ ->
             init_test_case(TestCase, Config)
     end;
+init_per_testcase(TestCase, Config)
+  when TestCase == publish_coordinator_unavailable ->
+    case rabbit_ct_broker_helpers:configured_metadata_store(Config) of
+        {khepri, []} ->
+            {skip, "test case should not run with Khepri"};
+        _ ->
+            init_test_case(TestCase, Config)
+    end;
 
 init_per_testcase(TestCase, Config) ->
     init_test_case(TestCase, Config).
@@ -445,12 +453,10 @@ find_queue_info(Config, Node, Keys) ->
 delete_queue(Config) ->
     [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
 
-    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
     Q = ?config(queue_name, Config),
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
                  declare(Config, Server, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
-    ?assertMatch(#'queue.delete_ok'{},
-                 amqp_channel:call(Ch, #'queue.delete'{queue = Q})).
+    ?assertMatch(#'queue.delete_ok'{}, delete(Config, Server, Q)).
 
 add_replicas(Config) ->
     [Server0, Server1, Server2] =
@@ -510,14 +516,14 @@ add_replicas(Config) ->
     after 60000 ->
               flush(),
               ?assertMatch(#'queue.delete_ok'{},
-                           amqp_channel:call(Ch, #'queue.delete'{queue = Q})),
+                           delete(Config, Server0, Q)),
               exit(deliver_timeout)
     end,
     % ?assertMatch({error, {disallowed, out_of_sync_replica}} ,
     %              rpc:call(Server0, rabbit_stream_queue, add_replica,
     %                       [<<"/">>, Q, Server2])),
     ?assertMatch(#'queue.delete_ok'{},
-                 amqp_channel:call(Ch, #'queue.delete'{queue = Q})),
+                 delete(Config, Server0, Q)),
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]).
 
 add_replica(Config) ->
@@ -744,8 +750,14 @@ delete_down_replica(Config) ->
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]).
 
 publish_coordinator_unavailable(Config) ->
-    [Server0, Server1, Server2] =
-        rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    %% This testcase leaves Khepri on minority when it is enabled.
+    %% If the Khepri leader is in one of the nodes being stopped, the
+    %% remaining node won't be able to reply to any channel query.
+    %% Let's remove it from the Khepri test suite, as it does not make
+    %% much sense to test something that will randomly work
+    %% depending on where the leader is placed - even though we could
+    %% always select as running node the Khepri leader
+    [Server0, Server1, Server2] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
     Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
     Q = ?config(queue_name, Config),
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
@@ -755,7 +767,7 @@ publish_coordinator_unavailable(Config) ->
     ok = rabbit_ct_broker_helpers:stop_node(Config, Server2),
     rabbit_ct_helpers:await_condition(
       fun () ->
-              N = rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_nodes, list_running, []),
+              N = rabbit_ct_broker_helpers:rpc(Config, Server0, rabbit_nodes, list_running, []),
               length(N) == 1
       end),
     #'confirm.select_ok'{} = amqp_channel:call(Ch, #'confirm.select'{}),
@@ -763,11 +775,13 @@ publish_coordinator_unavailable(Config) ->
     publish(Ch, Q),
     ?assertExit({{shutdown, {connection_closing, {server_initiated_close, 506, _}}}, _},
                 amqp_channel:wait_for_confirms(Ch, 60)),
-    ok = rabbit_ct_broker_helpers:start_node(Config, Server1),
-    ok = rabbit_ct_broker_helpers:start_node(Config, Server2),
+    ok = rabbit_ct_broker_helpers:async_start_node(Config, Server1),
+    ok = rabbit_ct_broker_helpers:async_start_node(Config, Server2),
+    ok = rabbit_ct_broker_helpers:wait_for_async_start_node(Server1),
+    ok = rabbit_ct_broker_helpers:wait_for_async_start_node(Server2),
     rabbit_ct_helpers:await_condition(
       fun () ->
-              Info = find_queue_info(Config, 0, [online]),
+              Info = find_queue_info(Config, Server0, [online]),
               length(proplists:get_value(online, Info)) == 3
       end),
     Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server0),
@@ -875,7 +889,9 @@ recover(Config) ->
 
     ct:pal("recover: running stop start for permutation ~w", [Servers]),
     [rabbit_ct_broker_helpers:stop_node(Config, S) || S <- Servers],
-    [rabbit_ct_broker_helpers:start_node(Config, S) || S <- lists:reverse(Servers)],
+    [rabbit_ct_broker_helpers:async_start_node(Config, S) || S <- lists:reverse(Servers)],
+    [ok = rabbit_ct_broker_helpers:wait_for_async_start_node(S) || S <- lists:reverse(Servers)],
+
     ct:pal("recover: running stop waiting for messages ~w", [Servers]),
     check_leader_and_replicas(Config, Servers0),
     queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]], 60),
@@ -886,7 +902,10 @@ recover(Config) ->
 
     ct:pal("recover: running app stop start for permuation ~w", [Servers1]),
     [rabbit_control_helper:command(stop_app, S) || S <- Servers1],
-    [rabbit_control_helper:command(start_app, S) || S <- lists:reverse(Servers1)],
+    [rabbit_control_helper:async_command(start_app, S, [], [])
+     || S <- lists:reverse(Servers1)],
+    [rabbit_control_helper:wait_for_async_command(S) || S <- lists:reverse(Servers1)],
+
     ct:pal("recover: running app stop waiting for messages ~w", [Servers1]),
     check_leader_and_replicas(Config, Servers0),
     queue_utils:wait_for_messages(Config, [[Q, <<"1">>, <<"1">>, <<"0">>]], 60),
@@ -907,10 +926,12 @@ restart_coordinator_without_queues(Config) ->
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
                  declare(Config, Server, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
     publish_confirm(Ch, Q, [<<"msg">>]),
-    ?assertMatch(#'queue.delete_ok'{}, amqp_channel:call(Ch, #'queue.delete'{queue = Q})),
+    ?assertMatch(#'queue.delete_ok'{}, delete(Config, Server, Q)),
 
     [rabbit_ct_broker_helpers:stop_node(Config, S) || S <- Servers0],
-    [rabbit_ct_broker_helpers:start_node(Config, S) || S <- lists:reverse(Servers0)],
+    [rabbit_ct_broker_helpers:async_start_node(Config, S) || S <- lists:reverse(tl(Servers0))],
+    [rabbit_ct_broker_helpers:wait_for_async_start_node(S) || S <- lists:reverse(tl(Servers0))],
+    rabbit_ct_broker_helpers:start_node(Config, hd(Servers0)),
 
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
                  declare(Config, Server, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
@@ -1112,37 +1133,6 @@ consume_with_autoack(Config) ->
     ?assertExit(
        {{shutdown, {connection_closing, {server_initiated_close, 540, _}}}, _},
        subscribe(Ch1, Q, true, 0)),
-    rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]).
-
-consume_and_nack(Config) ->
-    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
-
-    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
-    Q = ?config(queue_name, Config),
-    ?assertEqual({'queue.declare_ok', Q, 0, 0},
-                 declare(Config, Server, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
-
-    publish_confirm(Ch, Q, [<<"msg">>]),
-
-    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
-    qos(Ch1, 10, false),
-    subscribe(Ch1, Q, false, 0),
-    receive
-        {#'basic.deliver'{delivery_tag = DeliveryTag}, _} ->
-            ok = amqp_channel:cast(Ch1, #'basic.nack'{delivery_tag = DeliveryTag,
-                                                      multiple     = false,
-                                                      requeue      = true}),
-            %% Nack will throw a not implemented exception. As it is a cast operation,
-            %% we'll detect the conneciton/channel closure on the next call.
-            %% Let's try to redeclare and see what happens
-            ?assertExit({{shutdown, {connection_closing, {server_initiated_close, 540, _}}}, _},
-                        amqp_channel:call(Ch1, #'queue.declare'{queue = Q,
-                                                               durable = true,
-                                                               auto_delete = false,
-                                                               arguments = [{<<"x-queue-type">>, longstr, <<"stream">>}]}))
-    after 10000 ->
-            exit(timeout)
-    end,
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]).
 
 basic_cancel(Config) ->
@@ -1349,42 +1339,13 @@ filter_consumers(Config, Server, CTag) ->
                 end, [], CInfo).
 
 consume_and_reject(Config) ->
-    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
-
-    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
-    Q = ?config(queue_name, Config),
-    ?assertEqual({'queue.declare_ok', Q, 0, 0},
-                 declare(Config, Server, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
-
-    publish_confirm(Ch, Q, [<<"msg">>]),
-
-    Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
-    qos(Ch1, 10, false),
-    subscribe(Ch1, Q, false, 0),
-    receive
-        {#'basic.deliver'{delivery_tag = DeliveryTag}, _} ->
-            MRef = erlang:monitor(process, Ch1),
-            ok = amqp_channel:cast(Ch1, #'basic.reject'{delivery_tag = DeliveryTag,
-                                                      requeue      = true}),
-            %% Reject will throw a not implemented exception. As it is a cast
-            %% operation, we detect the connection error from the channel
-            %% process exit reason.
-            receive
-                {'DOWN', MRef, _, _, Reason} ->
-                    ?assertMatch(
-                       {shutdown,
-                        {connection_closing,
-                         {server_initiated_close, 540, _}}},
-                       Reason)
-            after 10000 ->
-                      exit(timeout)
-            end
-    after 10000 ->
-            exit(timeout)
-    end,
-    rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]).
-
+    consume_and_(Config, fun (DT) -> #'basic.reject'{delivery_tag = DT} end).
+consume_and_nack(Config) ->
+    consume_and_(Config, fun (DT) -> #'basic.nack'{delivery_tag = DT} end).
 consume_and_ack(Config) ->
+    consume_and_(Config, fun (DT) -> #'basic.ack'{delivery_tag = DT} end).
+
+consume_and_(Config, AckFun) ->
     [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
 
     Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
@@ -1399,8 +1360,7 @@ consume_and_ack(Config) ->
     subscribe(Ch1, Q, false, 0),
     receive
         {#'basic.deliver'{delivery_tag = DeliveryTag}, _} ->
-            ok = amqp_channel:cast(Ch1, #'basic.ack'{delivery_tag = DeliveryTag,
-                                                     multiple     = false}),
+            ok = amqp_channel:cast(Ch1, AckFun(DeliveryTag)),
             %% It will succeed as ack is now a credit operation. We should be
             %% able to redeclare a queue (gen_server call op) as the channel
             %% should still be open and declare is an idempotent operation
@@ -1933,7 +1893,7 @@ leader_failover_dedupe(Config) ->
                  declare(Config, DownNode, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
 
     check_leader_and_replicas(Config, Nodes),
-
+    timer:sleep(5000),
     Ch2 = rabbit_ct_client_helpers:open_channel(Config, PubNode),
     #'confirm.select_ok'{} = amqp_channel:call(Ch2, #'confirm.select'{}),
 
@@ -1993,7 +1953,6 @@ leader_failover_dedupe(Config) ->
 initial_cluster_size_one(Config) ->
     [Server1 | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
 
-    Ch = rabbit_ct_client_helpers:open_channel(Config, Server1),
     Q = ?config(queue_name, Config),
 
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
@@ -2002,13 +1961,12 @@ initial_cluster_size_one(Config) ->
     check_leader_and_replicas(Config, [Server1]),
 
     ?assertMatch(#'queue.delete_ok'{},
-                 amqp_channel:call(Ch, #'queue.delete'{queue = Q})),
+                 delete(Config, Server1, Q)),
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]).
 
 initial_cluster_size_two(Config) ->
     [Server1 | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
 
-    Ch = rabbit_ct_client_helpers:open_channel(Config, Server1),
     Q = ?config(queue_name, Config),
 
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
@@ -2021,7 +1979,7 @@ initial_cluster_size_two(Config) ->
     ?assertEqual(2, length(proplists:get_value(members, Info))),
 
     ?assertMatch(#'queue.delete_ok'{},
-                 amqp_channel:call(Ch, #'queue.delete'{queue = Q})),
+                 delete(Config, Server1, Q)),
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]).
 
 initial_cluster_size_one_policy(Config) ->
@@ -2033,7 +1991,6 @@ initial_cluster_size_one_policy(Config) ->
            <<"queues">>,
            [{<<"initial-cluster-size">>, 1}]),
 
-    Ch = rabbit_ct_client_helpers:open_channel(Config, Server1),
     Q = ?config(queue_name, Config),
 
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
@@ -2042,7 +1999,7 @@ initial_cluster_size_one_policy(Config) ->
     check_leader_and_replicas(Config, [Server1]),
 
     ?assertMatch(#'queue.delete_ok'{},
-                 amqp_channel:call(Ch, #'queue.delete'{queue = Q})),
+                 delete(Config, Server1, Q)),
 
     ok = rabbit_ct_broker_helpers:clear_policy(Config, 0, PolicyName),
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]).
@@ -2050,14 +2007,11 @@ initial_cluster_size_one_policy(Config) ->
 declare_delete_same_stream(Config) ->
     Servers = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
     Q = ?config(queue_name, Config),
-
     [begin
-         Ch = rabbit_ct_client_helpers:open_channel(Config, S),
          ?assertEqual({'queue.declare_ok', Q, 0, 0},
                       declare(Config, S, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
          ?assertMatch(#'queue.delete_ok'{},
-                      amqp_channel:call(Ch, #'queue.delete'{queue = Q})),
-         rabbit_ct_client_helpers:close_channel(Ch)
+                      delete(Config, S, Q))
      end || _ <- lists:seq(1, 20), S <- Servers],
 
     ok.
@@ -2065,7 +2019,6 @@ declare_delete_same_stream(Config) ->
 leader_locator_client_local(Config) ->
     [Server1, Server2, Server3] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
 
-    Ch = rabbit_ct_client_helpers:open_channel(Config, Server1),
     Q = ?config(queue_name, Config),
 
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
@@ -2077,10 +2030,9 @@ leader_locator_client_local(Config) ->
     ?assertEqual(Server1, proplists:get_value(leader, Info)),
 
     ?assertMatch(#'queue.delete_ok'{},
-                 amqp_channel:call(Ch, #'queue.delete'{queue = Q})),
+                 delete(Config, Server1, Q)),
 
     %% Try second node
-    Ch2 = rabbit_ct_client_helpers:open_channel(Config, Server2),
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
                  declare(Config, Server2, Q, [{<<"x-queue-type">>, longstr, <<"stream">>},
                                               {<<"x-queue-leader-locator">>, longstr, <<"client-local">>}])),
@@ -2088,11 +2040,9 @@ leader_locator_client_local(Config) ->
     Info2 = find_queue_info(Config, [leader]),
     ?assertEqual(Server2, proplists:get_value(leader, Info2)),
 
-    ?assertMatch(#'queue.delete_ok'{},
-                 amqp_channel:call(Ch2, #'queue.delete'{queue = Q})),
+    ?assertMatch(#'queue.delete_ok'{}, delete(Config, Server2, Q)),
 
     %% Try third node
-    Ch3 = rabbit_ct_client_helpers:open_channel(Config, Server3),
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
                  declare(Config, Server3, Q, [{<<"x-queue-type">>, longstr, <<"stream">>},
                                               {<<"x-queue-leader-locator">>, longstr, <<"client-local">>}])),
@@ -2101,8 +2051,7 @@ leader_locator_client_local(Config) ->
     Info3 = find_queue_info(Config, [leader]),
     ?assertEqual(Server3, proplists:get_value(leader, Info3)),
 
-    ?assertMatch(#'queue.delete_ok'{},
-                 amqp_channel:call(Ch3, #'queue.delete'{queue = Q})),
+    ?assertMatch(#'queue.delete_ok'{}, delete(Config, Server3, Q)),
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]).
 
 leader_locator_balanced(Config) ->
@@ -2247,9 +2196,6 @@ invalid_policy(Config) ->
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
                  declare(Config, Server, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
     ok = rabbit_ct_broker_helpers:set_policy(
-           Config, 0, <<"ha">>, <<"invalid_policy.*">>, <<"queues">>,
-           [{<<"ha-mode">>, <<"all">>}]),
-    ok = rabbit_ct_broker_helpers:set_policy(
            Config, 0, <<"ttl">>, <<"invalid_policy.*">>, <<"queues">>,
            [{<<"message-ttl">>, 5}]),
 
@@ -2258,7 +2204,6 @@ invalid_policy(Config) ->
     ?assertEqual('', proplists:get_value(policy, Info)),
     ?assertEqual('', proplists:get_value(operator_policy, Info)),
     ?assertEqual([], proplists:get_value(effective_policy_definition, Info)),
-    ok = rabbit_ct_broker_helpers:clear_policy(Config, 0, <<"ha">>),
     ok = rabbit_ct_broker_helpers:clear_policy(Config, 0, <<"ttl">>),
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]).
 
@@ -2542,6 +2487,9 @@ declare(Config, Server, Q, Args) ->
                                                                       auto_delete = false,
                                                                       arguments = Args}).
 
+delete(Config, Server, Q) ->
+    retry_if_coordinator_unavailable(Config, Server, #'queue.delete'{queue = Q}).
+
 retry_if_coordinator_unavailable(Config, Server, Cmd) ->
     Props = ?config(tc_group_properties, Config),
     %% Running parallel tests the coordinator could be busy answering other
@@ -2566,7 +2514,7 @@ retry_if_coordinator_unavailable(Config, Server, Cmd, Retry) ->
             case re:run(Msg, ".*coordinator_unavailable.*", [{capture, none}]) of
                 match ->
                     ct:pal("Attempt to execute command ~p failed, coordinator unavailable", [Cmd]),
-                    retry_if_coordinator_unavailable(Ch, Cmd, Retry - 1);
+                    retry_if_coordinator_unavailable(Config, Ch, Cmd, Retry - 1);
                 _ ->
                     exit(Error)
             end

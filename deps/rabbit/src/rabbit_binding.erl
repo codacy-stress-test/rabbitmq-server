@@ -100,13 +100,21 @@ recover(XNames, QNames) ->
 
 recover_semi_durable_route(Gatherer, Binding, Src, Dst, ToRecover, Fun) ->
     case sets:is_element(Dst, ToRecover) of
-        true  -> {ok, X} = rabbit_exchange:lookup(Src),
-                 ok = gatherer:fork(Gatherer),
-                 ok = worker_pool:submit_async(
-                        fun () ->
-                                Fun(Binding, X),
-                                gatherer:finish(Gatherer)
-                        end);
+        true  ->
+            case rabbit_exchange:lookup(Src) of
+                {ok, X} ->
+                    ok = gatherer:fork(Gatherer),
+                    ok = worker_pool:submit_async(
+                           fun () ->
+                                   Fun(Binding, X),
+                                   gatherer:finish(Gatherer)
+                           end);
+                {error, not_found}=Error ->
+                    rabbit_log:warning(
+                      "expected exchange ~tp to exist during recovery, "
+                      "error: ~tp", [Src, Error]),
+                    ok
+            end;
         false -> ok
     end.
 
@@ -382,7 +390,11 @@ combine_deletions(Deletions1, Deletions2) ->
 merge_entry({X1, Deleted1, Bindings1}, {X2, Deleted2, Bindings2}) ->
     {anything_but(undefined, X1, X2),
      anything_but(not_deleted, Deleted1, Deleted2),
-     [Bindings1 | Bindings2]}.
+     Bindings1 ++ Bindings2};
+merge_entry({X1, Deleted1, Bindings1, none}, {X2, Deleted2, Bindings2, none}) ->
+    {anything_but(undefined, X1, X2),
+     anything_but(not_deleted, Deleted1, Deleted2),
+     Bindings1 ++ Bindings2, none}.
 
 notify_deletions({error, not_found}, _) ->
     ok;

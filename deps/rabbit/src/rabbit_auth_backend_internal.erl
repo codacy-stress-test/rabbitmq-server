@@ -22,7 +22,9 @@
          add_user_sans_validation/3, put_user/2, put_user/3,
          update_user/5,
          update_user_with_hash/5,
-         add_user_sans_validation/6]).
+         add_user_sans_validation/6,
+         add_user_with_pre_hashed_password_sans_validation/3
+]).
 
 -export([set_user_limits/3, clear_user_limits/3, is_over_connection_limit/1,
          is_over_channel_limit/1, get_user_limits/0, get_user_limits/1]).
@@ -30,6 +32,8 @@
 -export([user_info_keys/0, perms_info_keys/0,
          user_perms_info_keys/0, vhost_perms_info_keys/0,
          user_vhost_perms_info_keys/0, all_users/0,
+         user_topic_perms_info_keys/0, vhost_topic_perms_info_keys/0,
+         user_vhost_topic_perms_info_keys/0,
          list_users/0, list_users/2, list_permissions/0,
          list_user_permissions/1, list_user_permissions/3,
          list_topic_permissions/0,
@@ -39,8 +43,12 @@
 
 -export([state_can_expire/0]).
 
-%% for testing
 -export([hashing_module_for_user/1, expand_topic_permission/2]).
+
+-ifdef(TEST).
+-export([extract_user_permission_params/2,
+         extract_topic_permission_params/2]).
+-endif.
 
 -import(rabbit_data_coercion, [to_atom/1, to_list/1, to_binary/1]).
 
@@ -216,6 +224,10 @@ add_user(Username, Password, ActingUser, Limits, Tags) ->
     validate_and_alternate_credentials(Username, Password, ActingUser,
                                        add_user_sans_validation(Limits, Tags)).
 
+add_user_with_pre_hashed_password_sans_validation(Username, PasswordHash, ActingUser) ->
+    HashingAlgorithm = rabbit_password:hashing_mod(),
+    add_user_sans_validation(Username, PasswordHash, HashingAlgorithm, [], undefined, ActingUser).
+
 add_user_sans_validation(Username, Password, ActingUser) ->
     add_user_sans_validation(Username, Password, ActingUser, undefined, []).
 
@@ -240,14 +252,12 @@ add_user_sans_validation(Username, Password, ActingUser, Limits, Tags) ->
            end,
     add_user_sans_validation_in(Username, User, ConvertedTags, Limits, ActingUser).
 
-add_user_sans_validation(Username, PasswordHash, HashingAlgorithm, Tags, Limits, ActingUser) ->
+add_user_sans_validation(Username, PasswordHash, HashingMod, Tags, Limits, ActingUser) ->
     rabbit_log:debug("Asked to create a new user '~ts' with password hash", [Username]),
     ConvertedTags = [rabbit_data_coercion:to_atom(I) || I <- Tags],
-    HashingMod = rabbit_password:hashing_mod(),
     User0 = internal_user:create_user(Username, PasswordHash, HashingMod),
     User1 = internal_user:set_tags(
-              internal_user:set_password_hash(User0,
-                                              PasswordHash, HashingAlgorithm),
+              internal_user:set_password_hash(User0, PasswordHash, HashingMod),
               ConvertedTags),
     User = case Limits of
                undefined -> User1;
@@ -292,7 +302,10 @@ delete_user(Username, ActingUser) ->
                                      {user_who_performed_action, ActingUser}]),
                 ok;
             false ->
-                ok
+                ok;
+            Error0 ->
+                rabbit_log:info("Failed to delete user '~ts': ~tp", [Username, Error0]),
+                throw(Error0)
         end
     catch
         Class:Error:Stacktrace ->

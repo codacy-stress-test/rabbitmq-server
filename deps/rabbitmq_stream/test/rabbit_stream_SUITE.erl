@@ -39,6 +39,9 @@ groups() ->
        test_publish_v2,
        test_gc_consumers,
        test_gc_publishers,
+       test_update_secret,
+       cannot_update_username_after_authenticated,
+       cannot_use_another_authmechanism_when_updating_secret,
        unauthenticated_client_rejected_tcp_connected,
        timeout_tcp_connected,
        unauthenticated_client_rejected_peer_properties_exchanged,
@@ -48,7 +51,8 @@ groups() ->
        timeout_close_sent,
        max_segment_size_bytes_validation,
        close_connection_on_consumer_update_timeout,
-       set_filter_size]},
+       set_filter_size
+      ]},
      %% Run `test_global_counters` on its own so the global metrics are
      %% initialised to 0 for each testcase
      {single_node_1, [], [test_global_counters]},
@@ -111,7 +115,8 @@ init_per_group(cluster = Group, Config) ->
                          {rmq_nodes_count, 3},
                          {rmq_nodename_suffix, Group},
                          {tcp_ports_base},
-                         {rabbitmq_ct_tls_verify, verify_none}
+                         {rabbitmq_ct_tls_verify, verify_none},
+                         {find_crashes, false} %% we kill stream members in some tests
                         ]),
     rabbit_ct_helpers:run_setup_steps(
       Config1,
@@ -131,6 +136,13 @@ end_per_group(_, Config) ->
     rabbit_ct_helpers:run_steps(Config,
                                 rabbit_ct_broker_helpers:teardown_steps()).
 
+init_per_testcase(test_update_secret = TestCase, Config) ->
+    rabbit_ct_helpers:testcase_started(Config, TestCase);
+
+init_per_testcase(cannot_update_username_after_authenticated = TestCase, Config) ->
+  ok = rabbit_ct_broker_helpers:add_user(Config, <<"other">>),
+  rabbit_ct_helpers:testcase_started(Config, TestCase);
+
 init_per_testcase(close_connection_on_consumer_update_timeout = TestCase, Config) ->
     ok = rabbit_ct_broker_helpers:rpc(Config,
                                       0,
@@ -140,6 +152,14 @@ init_per_testcase(close_connection_on_consumer_update_timeout = TestCase, Config
     rabbit_ct_helpers:testcase_started(Config, TestCase);
 init_per_testcase(TestCase, Config) ->
     rabbit_ct_helpers:testcase_started(Config, TestCase).
+
+end_per_testcase(test_update_secret = TestCase, Config) ->
+    ok = rabbit_ct_broker_helpers:change_password(Config, <<"guest">>, <<"guest">>),
+    rabbit_ct_helpers:testcase_finished(Config, TestCase);
+
+end_per_testcase(cannot_update_username_after_authenticated = TestCase, Config) ->
+    ok = rabbit_ct_broker_helpers:delete_user(Config, <<"other">>),
+    rabbit_ct_helpers:testcase_finished(Config, TestCase);
 
 end_per_testcase(filtering_ff = TestCase, Config) ->
     _ = rabbit_ct_broker_helpers:rpc(Config,
@@ -218,6 +238,34 @@ test_global_counters(Config) ->
 test_stream(Config) ->
     Stream = atom_to_binary(?FUNCTION_NAME, utf8),
     test_server(gen_tcp, Stream, Config),
+    ok.
+
+test_update_secret(Config) ->
+    Transport = gen_tcp,
+    {S, C0} = connect_and_authenticate(Transport, Config),
+    rabbit_ct_broker_helpers:change_password(Config, <<"guest">>, <<"password">>),
+    C1 = expect_successful_authentication(
+      try_authenticate(Transport, S, C0, <<"PLAIN">>, <<"guest">>, <<"password">>)),
+    _C2 = test_close(Transport, S, C1),
+    closed = wait_for_socket_close(Transport, S, 10),
+    ok.
+
+cannot_update_username_after_authenticated(Config) ->
+    {S, C0} = connect_and_authenticate(gen_tcp, Config),
+    C1 = expect_unsuccessful_authentication(
+      try_authenticate(gen_tcp, S, C0, <<"PLAIN">>, <<"other">>, <<"other">>),
+        ?RESPONSE_SASL_CANNOT_CHANGE_USERNAME),
+    _C2 = test_close(gen_tcp, S, C1),
+    closed = wait_for_socket_close(gen_tcp, S, 10),
+    ok.
+
+cannot_use_another_authmechanism_when_updating_secret(Config) ->
+    {S, C0} = connect_and_authenticate(gen_tcp, Config),
+    C1 = expect_unsuccessful_authentication(
+      try_authenticate(gen_tcp, S, C0, <<"EXTERNAL">>, <<"guest">>, <<"new_password">>),
+        ?RESPONSE_SASL_CANNOT_CHANGE_MECHANISM),
+    _C2 = test_close(gen_tcp, S, C1),
+    closed = wait_for_socket_close(gen_tcp, S, 10),
     ok.
 
 test_stream_tls(Config) ->
@@ -576,23 +624,43 @@ get_node_name(Config) ->
 get_node_name(Config, Node) ->
     rabbit_ct_broker_helpers:get_node_config(Config, Node, nodename).
 
+get_port(Transport, Config) ->
+  case Transport of
+      gen_tcp ->
+          get_stream_port(Config);
+      ssl ->
+          application:ensure_all_started(ssl),
+          get_stream_port_tls(Config)
+  end.
+get_opts(Transport) ->
+  case Transport of
+      gen_tcp ->
+          [{active, false}, {mode, binary}];
+      ssl ->
+          [{active, false}, {mode, binary}, {verify, verify_none}]
+  end.
+
+connect_and_authenticate(Transport, Config) ->
+  Port = get_port(Transport, Config),
+  Opts = get_opts(Transport),
+  {ok, S} = Transport:connect("localhost", Port, Opts),
+  C0 = rabbit_stream_core:init(0),
+  C1 = test_peer_properties(Transport, S, C0),
+  {S, test_authenticate(Transport, S, C1)}.
+
+try_authenticate(Transport, S, C, AuthMethod, Username, Password) ->
+  case AuthMethod of
+    <<"PLAIN">> ->
+      plain_sasl_authenticate(Transport, S, C, Username, Password);
+    _ ->
+      Null = 0,
+      sasl_authenticate(Transport, S, C, AuthMethod, <<Null:8, Username/binary, Null:8, Password/binary>>)
+  end.
+
 test_server(Transport, Stream, Config) ->
     QName = rabbit_misc:r(<<"/">>, queue, Stream),
-    Port =
-        case Transport of
-            gen_tcp ->
-                get_stream_port(Config);
-            ssl ->
-                application:ensure_all_started(ssl),
-                get_stream_port_tls(Config)
-        end,
-    Opts =
-        case Transport of
-            gen_tcp ->
-                [{active, false}, {mode, binary}];
-            ssl ->
-                [{active, false}, {mode, binary}, {verify, verify_none}]
-        end,
+    Port = get_port(Transport, Config),
+    Opts = get_opts(Transport),
     {ok, S} =
         Transport:connect("localhost", Port, Opts),
     C0 = rabbit_stream_core:init(0),
@@ -651,6 +719,9 @@ test_peer_properties(Transport, S, C0) ->
     C.
 
 test_authenticate(Transport, S, C0) ->
+  tune(Transport, S, test_plain_sasl_authenticate(Transport, S, sasl_handshake(Transport, S, C0))).
+
+sasl_handshake(Transport, S, C0) ->
     SaslHandshakeFrame =
         rabbit_stream_core:frame({request, 1, sasl_handshake}),
     ok = Transport:send(S, SaslHandshakeFrame),
@@ -663,18 +734,33 @@ test_authenticate(Transport, S, C0) ->
         _ ->
             ct:fail("invalid cmd ~tp", [Cmd])
     end,
+    C1.
 
-    Username = <<"guest">>,
-    Password = <<"guest">>,
+test_plain_sasl_authenticate(Transport, S, C1) ->
+  expect_successful_authentication(plain_sasl_authenticate(Transport, S, C1)).
+
+plain_sasl_authenticate(Transport, S, C1) ->
+    plain_sasl_authenticate(Transport, S, C1, <<"guest">>, <<"guest">>).
+
+plain_sasl_authenticate(Transport, S, C1, Username, Password) ->
     Null = 0,
-    PlainSasl = <<Null:8, Username/binary, Null:8, Password/binary>>,
+    sasl_authenticate(Transport, S, C1, <<"PLAIN">>, <<Null:8, Username/binary, Null:8, Password/binary>>).
 
+expect_successful_authentication({SaslAuth, C2} = _SaslReponse) ->
+  {response, 2, {sasl_authenticate, ?RESPONSE_CODE_OK}} = SaslAuth,
+  C2.
+expect_unsuccessful_authentication({SaslAuth, C2} = _SaslReponse, ExpectedError) ->
+  {response, 2, {sasl_authenticate, ExpectedError}} = SaslAuth,
+  C2.
+
+sasl_authenticate(Transport, S, C1, AuthMethod, AuthBody) ->
     SaslAuthenticateFrame =
         rabbit_stream_core:frame({request, 2,
-                                  {sasl_authenticate, Plain, PlainSasl}}),
+                                  {sasl_authenticate, AuthMethod, AuthBody}}),
     ok = Transport:send(S, SaslAuthenticateFrame),
-    {SaslAuth, C2} = receive_commands(Transport, S, C1),
-    {response, 2, {sasl_authenticate, ?RESPONSE_CODE_OK}} = SaslAuth,
+    receive_commands(Transport, S, C1).
+
+tune(Transport, S, C2) ->
     {Tune, C3} = receive_commands(Transport, S, C2),
     {tune, ?DEFAULT_FRAME_MAX, ?DEFAULT_HEARTBEAT} = Tune,
 
@@ -723,11 +809,14 @@ test_metadata_update_stream_deleted(Transport, S, Stream, C0) ->
     C1.
 
 test_declare_publisher(Transport, S, PublisherId, Stream, C0) ->
+    test_declare_publisher(Transport, S, PublisherId, <<>>, Stream, C0).
+
+test_declare_publisher(Transport, S, PublisherId, Reference, Stream, C0) ->
     DeclarePublisherFrame =
         rabbit_stream_core:frame({request, 1,
                                   {declare_publisher,
                                    PublisherId,
-                                   <<>>,
+                                   Reference,
                                    Stream}}),
     ok = Transport:send(S, DeclarePublisherFrame),
     {Cmd, C} = receive_commands(Transport, S, C0),
@@ -736,25 +825,35 @@ test_declare_publisher(Transport, S, PublisherId, Stream, C0) ->
     C.
 
 test_publish_confirm(Transport, S, PublisherId, Body, C0) ->
-    test_publish_confirm(Transport, S, publish, PublisherId, Body,
+    test_publish_confirm(Transport, S, PublisherId, 1, Body, C0).
+
+test_publish_confirm(Transport, S, PublisherId, Sequence, Body, C0) ->
+    test_publish_confirm(Transport, S, publish, PublisherId, Sequence, Body,
                          publish_confirm, C0).
 
-test_publish_confirm(Transport, S, publish = PublishCmd, PublisherId, Body,
-                     ExpectedConfirmCommand,C0) ->
+test_publish_confirm(Transport, S, PublishCmd, PublisherId, Body,
+                     ExpectedConfirmCommand, C0) ->
+    test_publish_confirm(Transport, S, PublishCmd, PublisherId, 1, Body,
+                         ExpectedConfirmCommand, C0).
+
+test_publish_confirm(Transport, S, publish = PublishCmd, PublisherId,
+                     Sequence, Body,
+                     ExpectedConfirmCommand, C0) ->
     BodySize = byte_size(Body),
-    Messages = [<<1:64, 0:1, BodySize:31, Body:BodySize/binary>>],
+    Messages = [<<Sequence:64, 0:1, BodySize:31, Body:BodySize/binary>>],
     PublishFrame =
         rabbit_stream_core:frame({PublishCmd, PublisherId, 1, Messages}),
     ok = Transport:send(S, PublishFrame),
     {Cmd, C} = receive_commands(Transport, S, C0),
-    ?assertMatch({ExpectedConfirmCommand, PublisherId, [1]}, Cmd),
+    ?assertMatch({ExpectedConfirmCommand, PublisherId, [Sequence]}, Cmd),
     C;
-test_publish_confirm(Transport, S, publish_v2 = PublishCmd, PublisherId, Body,
+test_publish_confirm(Transport, S, publish_v2 = PublishCmd, PublisherId,
+                     Sequence, Body,
                      ExpectedConfirmCommand, C0) ->
     BodySize = byte_size(Body),
     FilterValue = <<"foo">>,
     FilterValueSize = byte_size(FilterValue),
-    Messages = [<<1:64, FilterValueSize:16, FilterValue:FilterValueSize/binary,
+    Messages = [<<Sequence:64, FilterValueSize:16, FilterValue:FilterValueSize/binary,
                   0:1, BodySize:31, Body:BodySize/binary>>],
     PublishFrame =
         rabbit_stream_core:frame({PublishCmd, PublisherId, 1, Messages}),
@@ -762,9 +861,9 @@ test_publish_confirm(Transport, S, publish_v2 = PublishCmd, PublisherId, Body,
     {Cmd, C} = receive_commands(Transport, S, C0),
     case ExpectedConfirmCommand of
         publish_confirm ->
-            ?assertMatch({ExpectedConfirmCommand, PublisherId, [1]}, Cmd);
+            ?assertMatch({ExpectedConfirmCommand, PublisherId, [Sequence]}, Cmd);
         publish_error ->
-            ?assertMatch({ExpectedConfirmCommand, PublisherId, _, [1]}, Cmd)
+            ?assertMatch({ExpectedConfirmCommand, PublisherId, _, [Sequence]}, Cmd)
     end,
     C.
 
@@ -802,9 +901,9 @@ test_unsubscribe(Transport, Socket, SubscriptionId, C0) ->
     C.
 
 test_deliver(Transport, S, SubscriptionId, COffset, Body, C0) ->
-    ct:pal("test_deliver ", []),
     {{deliver, SubscriptionId, Chunk}, C} =
         receive_commands(Transport, S, C0),
+    ct:pal("test_deliver ~p", [Chunk]),
     <<5:4/unsigned,
       0:4/unsigned,
       0:8,
@@ -824,9 +923,9 @@ test_deliver(Transport, S, SubscriptionId, COffset, Body, C0) ->
     C.
 
 test_deliver_v2(Transport, S, SubscriptionId, COffset, Body, C0) ->
-    ct:pal("test_deliver ", []),
     {{deliver_v2, SubscriptionId, _CommittedOffset, Chunk}, C} =
         receive_commands(Transport, S, C0),
+    ct:pal("test_deliver_v2 ~p", [Chunk]),
     <<5:4/unsigned,
       0:4/unsigned,
       0:8,

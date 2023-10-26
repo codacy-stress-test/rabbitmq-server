@@ -23,15 +23,13 @@
 
 all() ->
     [
-     {group, non_parallel_tests}
+     {group, non_parallel_tests},
+     {group, non_parallel_tests_mirroring}
     ].
 
 groups() ->
     [{non_parallel_tests, [], [
                                list_cluster_nodes_test,
-                               multi_node_case1_test,
-                               ha_queue_hosted_on_other_node,
-                               ha_queue_with_multiple_consumers,
                                queue_on_other_node,
                                queue_with_multiple_consumers,
                                queue_consumer_cancelled,
@@ -58,7 +56,12 @@ groups() ->
                                qq_replicas_delete,
                                qq_replicas_grow,
                                qq_replicas_shrink
-                              ]}
+                              ]},
+     {non_parallel_tests_mirroring, [
+                                     multi_node_case1_test,
+                                     ha_queue_hosted_on_other_node,
+                                     ha_queue_with_multiple_consumers
+                                    ]}
     ].
 
 %% -------------------------------------------------------------------
@@ -95,6 +98,13 @@ end_per_suite(Config) ->
     rabbit_ct_helpers:run_teardown_steps(Config,
                                          rabbit_ct_broker_helpers:teardown_steps()).
 
+init_per_group(non_parallel_tests_mirroring, Config) ->
+    case rabbit_ct_broker_helpers:configured_metadata_store(Config) of
+        mnesia ->
+            Config;
+        {khepri, _} ->
+            {skip, "Classic queue mirroring not supported by Khepri"}
+    end;
 init_per_group(_, Config) ->
     Config.
 
@@ -827,7 +837,7 @@ disable_plugin(Config) ->
 
 clear_all_table_data() ->
     [ets:delete_all_objects(T) || {T, _} <- ?CORE_TABLES],
-    [ets:delete_all_objects(T) || {T, _} <- ?TABLES],
+    rabbit_mgmt_storage:reset(),
     [gen_server:call(P, purge_cache)
      || {_, P, _, _} <- supervisor:which_children(rabbit_mgmt_db_cache_sup)],
     send_to_all_collectors(purge_old_stats).

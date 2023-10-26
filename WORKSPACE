@@ -19,7 +19,7 @@ rules_pkg_dependencies()
 git_repository(
     name = "rules_erlang",
     remote = "https://github.com/rabbitmq/rules_erlang.git",
-    tag = "3.12.0",
+    tag = "3.13.1",
 )
 
 load("@rules_erlang//:internal_deps.bzl", "rules_erlang_internal_deps")
@@ -100,16 +100,16 @@ http_file(
 
 http_file(
     name = "otp_src_25_3",
-    downloaded_file_path = "OTP-25.3.2.6.tar.gz",
-    sha256 = "67e0f5c209a335cfc216a57b1f016072a69eb9683d36d6d101bf2f60a2e45926",
-    urls = ["https://github.com/erlang/otp/archive/OTP-25.3.2.6.tar.gz"],
+    downloaded_file_path = "OTP-25.3.2.7.tar.gz",
+    sha256 = "e8023bc61a7613a9beb0b60db166ae5eeb97de928924d1d1031e4aae8fb1e669",
+    urls = ["https://github.com/erlang/otp/archive/OTP-25.3.2.7.tar.gz"],
 )
 
 http_file(
-    name = "otp_src_26",
-    downloaded_file_path = "OTP-26.0.2.tar.gz",
-    sha256 = "4def5ed5e49815fb02fceae8a66e94abc1049f5de30f97d9ad12fdf3293a2470",
-    urls = ["https://github.com/erlang/otp/archive/OTP-26.0.2.tar.gz"],
+    name = "otp_src_26_1",
+    downloaded_file_path = "OTP-26.1.2.tar.gz",
+    sha256 = "56042d53b30863d4e720ebf463d777f0502f8c986957fc3a9e63dae870bbafe0",
+    urls = ["https://github.com/erlang/otp/archive/OTP-26.1.2.tar.gz"],
 )
 
 new_git_repository(
