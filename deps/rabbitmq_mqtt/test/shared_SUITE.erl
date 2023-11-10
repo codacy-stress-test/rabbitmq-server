@@ -143,10 +143,11 @@ cluster_size_3_tests() ->
      flow_stream,
      rabbit_mqtt_qos0_queue,
      cli_list_queues,
-     maintenance,
      delete_create_queue,
      session_reconnect,
-     session_takeover
+     session_takeover,
+     duplicate_client_id,
+     maintenance
     ].
 
 mnesia_store_tests() ->
@@ -154,8 +155,7 @@ mnesia_store_tests() ->
      consuming_classic_mirrored_queue_down,
      flow_classic_mirrored_queue,
      publish_to_all_queue_types_qos0,
-     publish_to_all_queue_types_qos1,
-     duplicate_client_id
+     publish_to_all_queue_types_qos1
     ].
 
 suite() ->
@@ -183,28 +183,28 @@ init_per_group(Group, Config)
        Group =:= v5 ->
     rabbit_ct_helpers:set_config(Config, {mqtt_version, Group});
 
-init_per_group(Group, Config00) ->
+init_per_group(Group, Config0) ->
     Nodes = case Group of
                 cluster_size_1 -> 1;
                 cluster_size_3 -> 3;
                 mnesia_store -> 3
             end,
-    Suffix = rabbit_ct_helpers:testcase_absname(Config00, "", "-"),
-    Config0 = case Group of
+    Suffix = rabbit_ct_helpers:testcase_absname(Config0, "", "-"),
+    Config1 = case Group of
                   mnesia_store ->
-                      rabbit_ct_helpers:set_config(Config00, [{metadata_store, mnesia}]);
+                      rabbit_ct_helpers:set_config(Config0, {metadata_store, mnesia});
                   _ ->
-                      Config00
+                      Config0
               end,
-    Config1 = rabbit_ct_helpers:set_config(
-                Config0,
+    Config2 = rabbit_ct_helpers:set_config(
+                Config1,
                 [{rmq_nodes_count, Nodes},
                  {rmq_nodename_suffix, Suffix}]),
-    Config2 = rabbit_ct_helpers:merge_app_env(
-                Config1,
+    Config3 = rabbit_ct_helpers:merge_app_env(
+                Config2,
                 {rabbit, [{classic_queue_default_version, 2}]}),
     Config = rabbit_ct_helpers:run_steps(
-               Config2,
+               Config3,
                rabbit_ct_broker_helpers:setup_steps() ++
                rabbit_ct_client_helpers:setup_steps()),
     util:maybe_skip_v5(Config).
@@ -754,10 +754,10 @@ global_counters(Config) ->
 pubsub(Config) ->
     Topic0 = <<"t/0">>,
     Topic1 = <<"t/1">>,
-    C0 = connect(<<"c0">>, Config, 0, []),
     C1 = connect(<<"c1">>, Config, 1, []),
-    {ok, _, [1]} = emqtt:subscribe(C0, Topic0, qos1),
     {ok, _, [1]} = emqtt:subscribe(C1, Topic1, qos1),
+    C0 = connect(<<"c0">>, Config, 0, []),
+    {ok, _, [1]} = emqtt:subscribe(C0, Topic0, qos1),
 
     {ok, _} = emqtt:publish(C0, Topic1, <<"m1">>, qos1),
     receive {publish, #{client_pid := C1,
@@ -1276,6 +1276,11 @@ cli_list_queues(Config) ->
     ok = emqtt:disconnect(C).
 
 maintenance(Config) ->
+    %% When either file rabbit_mqtt_collector changes or different OTP versions
+    %% are used for compilation, the rabbit_mqtt_collector module version will
+    %% change and cause a bad fun error when executing ra:leader_query/2 remotely.
+    ok = rabbit_ct_broker_helpers:enable_feature_flag(Config, delete_ra_cluster_mqtt_node),
+
     C0 = connect(<<"client-0">>, Config, 0, []),
     C1a = connect(<<"client-1a">>, Config, 1, []),
     C1b = connect(<<"client-1b">>, Config, 1, []),
@@ -1365,6 +1370,11 @@ keepalive_turned_off(Config) ->
     ok = emqtt:disconnect(C).
 
 duplicate_client_id(Config) ->
+    %% When either file rabbit_mqtt_collector changes or different OTP versions
+    %% are used for compilation, the rabbit_mqtt_collector module version will
+    %% change and cause a bad fun error when executing ra:leader_query/2 remotely.
+    ok = rabbit_ct_broker_helpers:enable_feature_flag(Config, delete_ra_cluster_mqtt_node),
+
     [Server1, Server2, _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
     %% Test session takeover by both new and old node in mixed version clusters.
     ClientId1 = <<"c1">>,
@@ -1394,14 +1404,14 @@ session_takeover(Config) ->
 session_switch(Config, Disconnect) ->
     Topic = ClientId = atom_to_binary(?FUNCTION_NAME),
     %% Connect to old node in mixed version cluster.
-    C1 = connect(ClientId, Config, 1, [non_clean_sess_opts()]),
+    C1 = connect(ClientId, Config, 1, non_clean_sess_opts()),
     {ok, _, [1]} = emqtt:subscribe(C1, Topic, qos1),
     case Disconnect of
         true -> ok = emqtt:disconnect(C1);
         false -> unlink(C1)
     end,
     %% Connect to new node in mixed version cluster.
-    C2 = connect(ClientId, Config, 0, [non_clean_sess_opts()]),
+    C2 = connect(ClientId, Config, 0, non_clean_sess_opts()),
     case Disconnect of
         true -> ok;
         false -> assert_v5_disconnect_reason_code(Config, ?RC_SESSION_TAKEN_OVER)
