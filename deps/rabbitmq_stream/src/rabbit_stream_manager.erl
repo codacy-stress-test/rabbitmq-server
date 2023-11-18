@@ -16,6 +16,8 @@
 
 -module(rabbit_stream_manager).
 
+-feature(maybe_expr, enable).
+
 -behaviour(gen_server).
 
 -include_lib("rabbit_common/include/rabbit_framing.hrl").
@@ -73,7 +75,7 @@ create_super_stream(VirtualHost,
                     Name,
                     Partitions,
                     Arguments,
-                    RoutingKeys,
+                    BindingKeys,
                     Username) ->
     gen_server:call(?MODULE,
                     {create_super_stream,
@@ -81,7 +83,7 @@ create_super_stream(VirtualHost,
                      Name,
                      Partitions,
                      Arguments,
-                     RoutingKeys,
+                     BindingKeys,
                      Username}).
 
 -spec delete_super_stream(binary(), binary(), binary()) ->
@@ -226,10 +228,10 @@ handle_call({create_super_stream,
              Name,
              Partitions,
              Arguments,
-             RoutingKeys,
+             BindingKeys,
              Username},
             _From, State) ->
-    case validate_super_stream_creation(VirtualHost, Name, Partitions) of
+    case validate_super_stream_creation(VirtualHost, Name, Partitions, BindingKeys) of
         {error, Reason} ->
             {reply, {error, Reason}, State};
         ok ->
@@ -273,7 +275,7 @@ handle_call({create_super_stream,
                                 add_super_stream_bindings(VirtualHost,
                                                           Name,
                                                           Partitions,
-                                                          RoutingKeys,
+                                                          BindingKeys,
                                                           Username),
                             case BindingsResult of
                                 ok ->
@@ -445,8 +447,8 @@ handle_call({route, RoutingKey, VirtualHost, SuperStream}, _From,
               end
           catch
               exit:Error ->
-                  rabbit_log:error("Error while looking up exchange ~tp, ~tp",
-                                   [rabbit_misc:rs(ExchangeName), Error]),
+                  rabbit_log:warning("Error while looking up exchange ~tp, ~tp",
+                                     [rabbit_misc:rs(ExchangeName), Error]),
                   {error, stream_not_found}
           end,
     {reply, Res, State};
@@ -518,85 +520,99 @@ handle_info(Info, State) ->
     {noreply, State}.
 
 create_stream(VirtualHost, Reference, Arguments, Username) ->
-    Name =
-        #resource{virtual_host = VirtualHost,
-                  kind = queue,
-                  name = Reference},
     StreamQueueArguments = stream_queue_arguments(Arguments),
-    case validate_stream_queue_arguments(StreamQueueArguments) of
-        ok ->
-            Q0 = amqqueue:new(Name,
-                              none,
-                              true,
-                              false,
-                              none,
-                              StreamQueueArguments,
-                              VirtualHost,
-                              #{user => Username},
-                              rabbit_stream_queue),
-            try
-                QueueLookup =
-                    rabbit_amqqueue:with(Name,
-                                         fun(Q) ->
-                                            ok =
-                                                rabbit_amqqueue:assert_equivalence(Q,
-                                                                                   true,
-                                                                                   false,
-                                                                                   StreamQueueArguments,
-                                                                                   none)
-                                         end),
+    maybe
+        ok ?= case rabbit_vhost_limit:is_over_queue_limit(VirtualHost) of
+                  false ->
+                      ok;
+                  {true, Limit} ->
+                      rabbit_log:warning("Cannot declare stream ~tp because "
+                                         "queue limit ~tp in vhost '~tp' is reached",
+                                         [Reference, Limit, VirtualHost]),
+                      {error, validation_failed}
+              end,
+        ok ?= validate_stream_queue_arguments(StreamQueueArguments),
+        do_create_stream(VirtualHost, Reference, StreamQueueArguments, Username)
+    else
+        error ->
+            {error, validation_failed};
+        {error, _} = Err ->
+            Err
+    end.
 
-                case QueueLookup of
-                    ok ->
-                        {error, reference_already_exists};
-                    {error, not_found} ->
-                        try
-                            case rabbit_queue_type:declare(Q0, node()) of
-                                {new, Q} ->
-                                    {ok, amqqueue:get_type_state(Q)};
-                                {existing, _} ->
-                                    {error, reference_already_exists};
-                                {error, Err} ->
-                                    rabbit_log:warning("Error while creating ~tp stream, ~tp",
-                                                       [Reference, Err]),
-                                    {error, internal_error};
-                                {protocol_error,
-                                 precondition_failed,
-                                 Msg,
-                                 Args} ->
-                                    rabbit_log:warning("Error while creating ~tp stream, "
-                                                       ++ Msg,
-                                                       [Reference] ++ Args),
-                                    {error, validation_failed}
-                            end
-                        catch
-                            exit:Error ->
-                                rabbit_log:error("Error while creating ~tp stream, ~tp",
-                                                 [Reference, Error]),
-                                {error, internal_error}
-                        end;
-                    {error, {absent, _, Reason}} ->
-                        rabbit_log:error("Error while creating ~tp stream, ~tp",
-                                         [Reference, Reason]),
-                        {error, internal_error}
-                end
-            catch
-                exit:ExitError ->
-                    case ExitError of
-                        % likely a problem of inequivalent args on an existing stream
-                        {amqp_error, precondition_failed, M, _} ->
-                            rabbit_log:info("Error while creating ~tp stream, "
-                                            ++ M,
-                                            [Reference]),
-                            {error, validation_failed};
-                        E ->
+do_create_stream(VirtualHost, Reference, StreamQueueArguments, Username) ->
+    Name = #resource{virtual_host = VirtualHost,
+                     kind = queue,
+                     name = Reference},
+    Q0 = amqqueue:new(Name,
+                      none,
+                      true,
+                      false,
+                      none,
+                      StreamQueueArguments,
+                      VirtualHost,
+                      #{user => Username},
+                      rabbit_stream_queue),
+    try
+        QueueLookup =
+        rabbit_amqqueue:with(Name,
+                             fun(Q) ->
+                                     ok =
+                                     rabbit_amqqueue:assert_equivalence(Q,
+                                                                        true,
+                                                                        false,
+                                                                        StreamQueueArguments,
+                                                                        none)
+                             end),
+
+        case QueueLookup of
+            ok ->
+                {error, reference_already_exists};
+            {error, not_found} ->
+                try
+                    case rabbit_queue_type:declare(Q0, node()) of
+                        {new, Q} ->
+                            {ok, amqqueue:get_type_state(Q)};
+                        {existing, _} ->
+                            {error, reference_already_exists};
+                        {error, Err} ->
                             rabbit_log:warning("Error while creating ~tp stream, ~tp",
-                                               [Reference, E]),
+                                               [Reference, Err]),
+                            {error, internal_error};
+                        {protocol_error,
+                         precondition_failed,
+                         Msg,
+                         Args} ->
+                            rabbit_log:warning("Error while creating ~tp stream, "
+                                               ++ Msg,
+                                               [Reference] ++ Args),
                             {error, validation_failed}
                     end
-            end;
-        error ->
-            {error, validation_failed}
+                catch
+                    exit:Error ->
+                        rabbit_log:error("Error while creating ~tp stream, ~tp",
+                                         [Reference, Error]),
+                        {error, internal_error}
+                end;
+            {error, {absent, _, Reason}} ->
+                rabbit_log:error("Error while creating ~tp stream, ~tp",
+                                 [Reference, Reason]),
+                {error, internal_error}
+        end
+    catch
+        exit:ExitError ->
+            case ExitError of
+                % likely a problem of inequivalent args on an existing stream
+                {amqp_error, precondition_failed, M, _} ->
+                    rabbit_log:info("Error while creating ~tp stream, "
+                                    ++ M,
+                                    [Reference]),
+                    {error, validation_failed};
+                E ->
+                    rabbit_log:warning("Error while creating ~tp stream, ~tp",
+                                       [Reference, E]),
+                    {error, validation_failed}
+            end
     end.
 
 delete_stream(VirtualHost, Reference, Username) ->
@@ -655,25 +671,35 @@ super_stream_partitions(VirtualHost, SuperStream) ->
             {error, stream_not_found}
     end.
 
-validate_super_stream_creation(VirtualHost, Name, Partitions) ->
-    case exchange_exists(VirtualHost, Name) of
-        {error, validation_failed} ->
-            {error,
-             {validation_failed,
-              rabbit_misc:format("~ts is not a correct name for a super stream",
-                                 [Name])}};
-        {ok, true} ->
-            {error,
-             {reference_already_exists,
-              rabbit_misc:format("there is already an exchange named ~ts",
-                                 [Name])}};
-        {ok, false} ->
-            case check_already_existing_queue(VirtualHost, Partitions) of
-                {error, Reason} ->
-                    {error, Reason};
-                ok ->
-                    ok
-            end
+validate_super_stream_creation(_VirtualHost, _Name, Partitions, BindingKeys)
+  when length(Partitions) =/= length(BindingKeys) ->
+   {error, {validation_failed, "There must be the same number of partitions and binding keys"}};
+validate_super_stream_creation(VirtualHost, Name, Partitions, _BindingKeys) ->
+    maybe
+        ok ?= case rabbit_vhost_limit:would_exceed_queue_limit(length(Partitions), VirtualHost) of
+                  false ->
+                      ok;
+                  {true, Limit, _} ->
+                      {error, {validation_failed,
+                               rabbit_misc:format("Cannot declare super stream ~tp with ~tp partition(s) "
+                                                  "because queue limit ~tp in vhost '~tp' is reached",
+                                                  [Name, length(Partitions), Limit, VirtualHost])}}
+              end,
+        ok ?= case exchange_exists(VirtualHost, Name) of
+                  {error, validation_failed} ->
+                      {error,
+                       {validation_failed,
+                        rabbit_misc:format("~ts is not a correct name for a super stream",
+                                           [Name])}};
+                  {ok, true} ->
+                      {error,
+                       {reference_already_exists,
+                        rabbit_misc:format("there is already an exchange named ~ts",
+                                           [Name])}};
+                  {ok, false} ->
+                      ok
+              end,
+        ok ?= check_already_existing_queue(VirtualHost, Partitions)
     end.
 
 exchange_exists(VirtualHost, Name) ->
@@ -758,15 +784,15 @@ declare_super_stream_exchange(VirtualHost, Name, Username) ->
 add_super_stream_bindings(VirtualHost,
                           Name,
                           Partitions,
-                          RoutingKeys,
+                          BindingKeys,
                           Username) ->
-    PartitionsRoutingKeys = lists:zip(Partitions, RoutingKeys),
+    PartitionsBindingKeys = lists:zip(Partitions, BindingKeys),
     BindingsResult =
-        lists:foldl(fun ({Partition, RoutingKey}, {ok, Order}) ->
+        lists:foldl(fun ({Partition, BindingKey}, {ok, Order}) ->
                             case add_super_stream_binding(VirtualHost,
                                                           Name,
                                                           Partition,
-                                                          RoutingKey,
+                                                          BindingKey,
                                                           Order,
                                                           Username)
                             of
@@ -778,7 +804,7 @@ add_super_stream_bindings(VirtualHost,
                         (_, {{error, _Reason}, _Order} = Acc) ->
                             Acc
                     end,
-                    {ok, 0}, PartitionsRoutingKeys),
+                    {ok, 0}, PartitionsBindingKeys),
     case BindingsResult of
         {ok, _} ->
             ok;
@@ -789,7 +815,7 @@ add_super_stream_bindings(VirtualHost,
 add_super_stream_binding(VirtualHost,
                          SuperStream,
                          Partition,
-                         RoutingKey,
+                         BindingKey,
                          Order,
                          Username) ->
     {ok, ExchangeNameBin} =
@@ -806,7 +832,7 @@ add_super_stream_binding(VirtualHost,
                                     Order),
     case rabbit_binding:add(#binding{source = ExchangeName,
                                      destination = QueueName,
-                                     key = RoutingKey,
+                                     key = BindingKey,
                                      args = Arguments},
                             fun (_X, Q) when ?is_amqqueue(Q) ->
                                     try
