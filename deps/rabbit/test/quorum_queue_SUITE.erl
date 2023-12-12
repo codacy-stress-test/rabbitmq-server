@@ -156,6 +156,7 @@ all_tests() ->
      delete_if_unused,
      queue_ttl,
      peek,
+     oldest_entry_timestamp,
      peek_with_wrong_queue_type,
      message_ttl,
      message_ttl_policy,
@@ -1658,7 +1659,7 @@ channel_handles_ra_event(Config) ->
 
 declare_during_node_down(Config) ->
     [Server, DownServer, _] = Servers = rabbit_ct_broker_helpers:get_node_configs(
-                                    Config, nodename),
+                                          Config, nodename),
 
     stop_node(Config, DownServer),
     Running = Servers -- [DownServer],
@@ -1684,7 +1685,20 @@ declare_during_node_down(Config) ->
 
     publish(Ch, QQ),
     wait_for_messages_ready(Servers, RaName, 1),
-    ok.
+
+    case rabbit_ct_helpers:is_mixed_versions() of
+        true ->
+            %% stop here if mixexd
+            ok;
+        false ->
+            %% further assertions that we can consume from the newly
+            %% started member
+            SubCh = rabbit_ct_client_helpers:open_channel(Config, DownServer),
+            subscribe(SubCh, QQ, false),
+            receive_and_ack(Ch),
+            wait_for_messages_ready(Servers, RaName, 0),
+            ok
+    end.
 
 simple_confirm_availability_on_leader_change(Config) ->
     [Node1, Node2, _Node3] = Servers =
@@ -2716,6 +2730,45 @@ peek(Config) ->
     wait_for_messages(Config, [[QQ, <<"2">>, <<"2">>, <<"0">>]]),
     ok.
 
+oldest_entry_timestamp(Config) ->
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    QQ = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', QQ, 0, 0},
+                 declare(Ch, QQ, [{<<"x-queue-type">>, longstr, <<"quorum">>},
+                                  {<<"x-max-in-memory-length">>, long, 2}])),
+
+    Msg1 = <<"msg1">>,
+    VHost = <<"%2F">>,
+    ServerId = binary_to_atom(<<VHost/binary, "_", QQ/binary>>, utf8),
+
+    ?assertMatch({ok, Ts} when is_integer(Ts),
+                 rabbit_ct_broker_helpers:rpc(Config, 0, ra,
+                                              aux_command,
+                                              [ServerId, oldest_entry_timestamp])),
+    publish(Ch, QQ, Msg1),
+    wait_for_messages(Config, [[QQ, <<"1">>, <<"1">>, <<"0">>]]),
+
+    ?assertMatch({ok, Ts} when is_integer(Ts),
+                 rabbit_ct_broker_helpers:rpc(Config, 0, ra,
+                                              aux_command,
+                                              [ServerId, oldest_entry_timestamp])),
+    ?assertMatch({ok, Ts} when is_integer(Ts),
+                 rabbit_ct_broker_helpers:rpc(Config, 0, ra,
+                                              aux_command,
+                                              [ServerId, oldest_entry_timestamp])),
+
+    {'queue.purge_ok', 1} = amqp_channel:call(Ch, #'queue.purge'{queue = QQ}),
+    Now = erlang:system_time(millisecond),
+    timer:sleep(100),
+    ?assertMatch({ok, Ts2} when Ts2 > Now,
+                 rabbit_ct_broker_helpers:rpc(Config, 0, ra,
+                                              aux_command,
+                                              [ServerId, oldest_entry_timestamp])),
+
+    ok.
+
 -define(STATUS_MATCH(N, T),
         [{<<"Node Name">>, N},
          {<<"Raft State">>, _},
@@ -2881,6 +2934,8 @@ receive_and_ack(Ch) ->
                           redelivered  = false}, _} ->
             amqp_channel:cast(Ch, #'basic.ack'{delivery_tag = DeliveryTag,
                                                multiple = false})
+    after 5000 ->
+              ct:fail("receive_and_ack timed out", [])
     end.
 
 message_ttl_policy(Config) ->
