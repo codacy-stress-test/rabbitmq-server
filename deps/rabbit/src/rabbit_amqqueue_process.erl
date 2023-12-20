@@ -212,7 +212,7 @@ init_it2(Recover, From, State = #q{q                   = Q,
                                        backing_queue_state = BQS}),
                     notify_decorators(startup, State),
                     rabbit_event:notify(queue_created,
-                                        infos(?CREATION_EVENT_KEYS, State1)),
+                                        queue_created_infos(State1)),
                     rabbit_event:if_enabled(State1, #q.stats_timer,
                                             fun() -> emit_stats(State1) end),
                     noreply(State1);
@@ -1659,7 +1659,7 @@ handle_cast({credit, ChPid, CTag, Credit, Drain},
 % the correct values once the management agent has started
 handle_cast({force_event_refresh, Ref},
             State = #q{consumers = Consumers}) ->
-    rabbit_event:notify(queue_created, infos(?CREATION_EVENT_KEYS, State), Ref),
+    rabbit_event:notify(queue_created, queue_created_infos(State), Ref),
     QName = qname(State),
     AllConsumers = rabbit_queue_consumers:all(Consumers),
     rabbit_log:debug("Queue ~ts forced to re-emit events, consumers: ~tp", [rabbit_misc:rs(QName), AllConsumers]),
@@ -1716,9 +1716,12 @@ handle_cast({sync_start, _, _}, State = #q{q = Q}) ->
       Name, "Stopping after receiving sync_start from another master", []),
     stop(State).
 
-handle_info({maybe_expire, Vsn}, State = #q{args_policy_version = Vsn}) ->
+handle_info({maybe_expire, Vsn}, State = #q{q = Q, expires = Expiry, args_policy_version = Vsn}) ->
     case is_unused(State) of
-        true  -> stop(State);
+        true  ->
+            QResource = rabbit_misc:rs(amqqueue:get_name(Q)),
+            rabbit_log_queue:debug("Deleting 'classic ~ts' on expiry after ~tp milliseconds", [QResource, Expiry]),
+            stop(State);
         false -> noreply(State#q{expiry_timer_ref = undefined})
     end;
 
@@ -1907,3 +1910,8 @@ update_state(State, Q) ->
                                    Q1 = amqqueue:set_state(Q0, State),
                                    amqqueue:set_decorators(Q1, Decorators)
                            end).
+
+queue_created_infos(State) ->
+    %% On the events API, we use long names for queue types
+    Keys = ?CREATION_EVENT_KEYS -- [type],
+    infos(Keys, State) ++ [{type, rabbit_classic_queue}].

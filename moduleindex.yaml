@@ -714,6 +714,7 @@ rabbit:
 - rabbit_definitions_hashing
 - rabbit_definitions_import_https
 - rabbit_definitions_import_local_filesystem
+- rabbit_depr_ff_extra
 - rabbit_deprecated_features
 - rabbit_diagnostics
 - rabbit_direct
@@ -775,6 +776,7 @@ rabbit:
 - rabbit_mirror_queue_sync
 - rabbit_mnesia
 - rabbit_mnesia_rename
+- rabbit_mnesia_to_khepri_record_converter
 - rabbit_msg_file
 - rabbit_msg_record
 - rabbit_msg_store
@@ -1059,6 +1061,7 @@ rabbitmq_management:
 - rabbit_mgmt_wm_connections_vhost
 - rabbit_mgmt_wm_consumers
 - rabbit_mgmt_wm_definitions
+- rabbit_mgmt_wm_deprecated_features
 - rabbit_mgmt_wm_environment
 - rabbit_mgmt_wm_exchange
 - rabbit_mgmt_wm_exchange_publish
