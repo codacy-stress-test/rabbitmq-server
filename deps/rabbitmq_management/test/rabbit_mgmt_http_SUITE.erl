@@ -93,6 +93,7 @@ all_tests() -> [
     permissions_administrator_test,
     permissions_vhost_test,
     permissions_amqp_test,
+    permissions_queue_delete_test,
     permissions_connection_channel_consumer_test,
     consumers_cq_test,
     consumers_qq_test,
@@ -148,7 +149,8 @@ all_tests() -> [
     rates_test,
     single_active_consumer_cq_test,
     single_active_consumer_qq_test,
-%%    oauth_test,  %% disabled until we are able to enable oauth2 plugin
+    %% This test needs the OAuth 2 plugin to be enabled
+    %% oauth_test,
     disable_basic_auth_test,
     login_test,
     csp_headers_test,
@@ -1427,6 +1429,18 @@ permissions_amqp_test(Config) ->
     http_delete(Config, "/users/myuser", {group, '2xx'}),
     passed.
 
+permissions_queue_delete_test(Config) ->
+    QArgs = #{},
+    PermArgs = [{configure, <<"foo.*">>}, {write, <<".*">>}, {read, <<".*">>}],
+    http_put(Config, "/users/myuser", [{password, <<"myuser">>},
+                                       {tags, <<"management">>}], {group, '2xx'}),
+    http_put(Config, "/permissions/%2F/myuser", PermArgs, {group, '2xx'}),
+    http_put(Config, "/queues/%2F/bar-queue", QArgs, {group, '2xx'}),
+    http_delete(Config, "/queues/%2F/bar-queue", "myuser", "myuser", ?NOT_AUTHORISED),
+    http_delete(Config, "/queues/%2F/bar-queue", {group, '2xx'}),
+    http_delete(Config, "/users/myuser", {group, '2xx'}),
+    passed.
+
 %% Opens a new connection and a channel on it.
 %% The channel is not managed by rabbit_ct_client_helpers and
 %% should be explicitly closed by the caller.
@@ -2050,7 +2064,9 @@ queue_purge_test(Config) ->
     http_delete(Config, "/queues/%2F/myqueue/contents", {group, '2xx'}),
     http_delete(Config, "/queues/%2F/badqueue/contents", ?NOT_FOUND),
     http_delete(Config, "/queues/%2F/exclusive/contents", ?BAD_REQUEST),
-    http_delete(Config, "/queues/%2F/exclusive", {group, '2xx'}),
+    http_delete(Config, "/queues/%2F/exclusive", ?BAD_REQUEST),
+    #'basic.get_empty'{} =
+        amqp_channel:call(Ch, #'basic.get'{queue = <<"myqueue">>}),
     close_channel(Ch),
     close_connection(Conn),
     http_delete(Config, "/queues/%2F/myqueue", {group, '2xx'}),
