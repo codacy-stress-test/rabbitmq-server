@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2018-2023 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 -module(rabbit_quorum_queue).
@@ -1647,8 +1647,8 @@ peek(Pos, Q) when ?is_amqqueue(Q) andalso ?amqqueue_is_quorum(Q) ->
                        _ -> 0
                     end,
             Msg = mc:set_annotation(<<"x-delivery-count">>, Count, Msg0),
-            XName = mc:get_annotation(exchange, Msg),
-            RoutingKeys = mc:get_annotation(routing_keys, Msg),
+            XName = mc:exchange(Msg),
+            RoutingKeys = mc:routing_keys(Msg),
             AmqpLegacyMsg = mc:prepare(read, mc:convert(mc_amqpl, Msg)),
             Content = mc:protocol_state(AmqpLegacyMsg),
             {ok, rabbit_basic:peek_fmt_message(XName, RoutingKeys, Content)};
