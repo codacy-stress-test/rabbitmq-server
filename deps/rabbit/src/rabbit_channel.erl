@@ -825,7 +825,8 @@ terminate(_Reason,
           end, CM),
     rabbit_core_metrics:channel_closed(self()),
     rabbit_event:notify(channel_closed, [{pid, self()},
-                                         {user_who_performed_action, Username}]),
+                                         {user_who_performed_action, Username},
+                                         {consumer_count, maps:size(CM)}]),
     case rabbit_confirms:size(State#ch.unconfirmed) of
         0 -> ok;
         NumConfirms ->
@@ -2780,13 +2781,15 @@ evaluate_consumer_timeout1(PA = #pending_ack{delivered_at = Time},
             {noreply, State}
     end.
 
-handle_consumer_timed_out(Timeout,#pending_ack{delivery_tag = DeliveryTag},
+handle_consumer_timed_out(Timeout,#pending_ack{delivery_tag = DeliveryTag, tag = ConsumerTag, queue = QName},
 			  State = #ch{cfg = #conf{channel = Channel}}) ->
-    rabbit_log_channel:warning("Consumer ~ts on channel ~w has timed out "
-			       "waiting for delivery acknowledgement. Timeout used: ~tp ms. "
+    rabbit_log_channel:warning("Consumer '~ts' on channel ~w and ~ts has timed out "
+			       "waiting for a consumer acknowledgement of a delivery with delivery tag = ~b. Timeout used: ~tp ms. "
 			       "This timeout value can be configured, see consumers doc guide to learn more",
-			       [rabbit_data_coercion:to_binary(DeliveryTag),
-				Channel, Timeout]),
+			       [ConsumerTag,
+                    Channel,
+                    rabbit_misc:rs(QName),
+                    DeliveryTag, Timeout]),
     Ex = rabbit_misc:amqp_error(precondition_failed,
 				"delivery acknowledgement on channel ~w timed out. "
 				"Timeout value used: ~tp ms. "
@@ -2858,4 +2861,3 @@ maybe_decrease_global_publishers(#ch{publishing_mode = true}) ->
 
 is_global_qos_permitted() ->
     rabbit_deprecated_features:is_permitted(global_qos).
-
