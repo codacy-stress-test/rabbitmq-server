@@ -49,7 +49,7 @@ bazel_dep(
 
 bazel_dep(
     name = "rabbitmq_ra",
-    version = "2.7.3",
+    version = "2.9.1",
     repo_name = "ra",
 )
 
@@ -90,8 +90,8 @@ erlang_config.internal_erlang_from_github_release(
 
 erlang_config.internal_erlang_from_github_release(
     name = "25_3",
-    sha256 = "9424d7713b361c8a24690515acbd7e0fd37b67d54cad1e1e4af146eae0e335d3",
-    version = "25.3.2.8",
+    sha256 = "b305190e01e84eddb26d0140637f26adf674c87351c679f3bbefc8685d22cc05",
+    version = "25.3.2.9",
 )
 
 erlang_config.internal_erlang_from_github_release(
@@ -102,8 +102,8 @@ erlang_config.internal_erlang_from_github_release(
 
 erlang_config.internal_erlang_from_github_release(
     name = "26_2",
-    sha256 = "80d66bafbae409481a4e1badcb4a6275b07a8e9af82980c08d7a8add483232a9",
-    version = "26.2.1",
+    sha256 = "d537ff4ac5d8c1cb507aedaf7198fc1f155ea8aa65a8d83edb35c2802763cc28",
+    version = "26.2.2",
 )
 
 erlang_config.internal_erlang_from_http_archive(
@@ -338,8 +338,8 @@ erlang_package.hex_package(
     name = "ra_alt",
     build_file = "@rabbitmq-server//bazel:BUILD.ra",
     pkg = "ra",
-    sha256 = "6f2b912a779f4efa4deea762b65192ed6e87111c7d98cbbe8a29576964739147",
-    version = "2.7.3",
+    sha256 = "ee7f63461e9b1734e99a7d38cb601803dc0868f015672d795857fa329287288c",
+    version = "2.9.1",
 )
 
 erlang_package.git_package(
