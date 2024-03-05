@@ -39,6 +39,8 @@ define PROJECT_ENV
 	    {default_user_tags, [administrator]},
 	    {default_vhost, <<"/">>},
 	    {default_permissions, [<<".*">>, <<".*">>, <<".*">>]},
+	    {amqp1_0_default_user, <<"guest">>},
+	    {amqp1_0_default_vhost, <<"/">>},
 	    {loopback_users, [<<"guest">>]},
 	    {password_hashing_module, rabbit_password_hashing_sha256},
 	    {server_properties, []},
@@ -133,13 +135,13 @@ endef
 LOCAL_DEPS = sasl os_mon inets compiler public_key crypto ssl syntax_tools xmerl
 
 BUILD_DEPS = rabbitmq_cli
-DEPS = ranch rabbit_common rabbitmq_prelaunch ra sysmon_handler stdout_formatter recon redbug observer_cli osiris amqp10_common syslog systemd seshat khepri khepri_mnesia_migration
-TEST_DEPS = rabbitmq_ct_helpers rabbitmq_ct_client_helpers amqp_client meck proper
+DEPS = ranch rabbit_common amqp10_common rabbitmq_prelaunch ra sysmon_handler stdout_formatter recon redbug observer_cli osiris syslog systemd seshat khepri khepri_mnesia_migration
+TEST_DEPS = rabbitmq_ct_helpers rabbitmq_ct_client_helpers meck proper amqp_client amqp10_client rabbitmq_amqp1_0
 
 PLT_APPS += mnesia
 
 dep_syslog = git https://github.com/schlagert/syslog 4.0.0
-dep_osiris = git https://github.com/rabbitmq/osiris v1.7.2
+dep_osiris = git https://github.com/rabbitmq/osiris v1.8.0
 dep_systemd = hex 0.6.1
 
 dep_seshat = git https://github.com/rabbitmq/seshat v0.6.1

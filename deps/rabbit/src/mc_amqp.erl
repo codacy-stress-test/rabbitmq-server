@@ -58,14 +58,32 @@
               message_section/0
              ]).
 
-%% mc implementation
+%% TODO
+%% Up to 3.13 the parsed AMQP 1.0 message is never stored on disk.
+%% We want that to hold true for 4.0 as well to save disk space and disk I/O.
+%%
+%% As the essential annotations, durable, priority, ttl and delivery_count
+%% is all we are interested in it isn't necessary to keep hold of the
+%% incoming AMQP header inside the state
+%%
+%% Probably prepare(store, Msg) should serialize the message.
+%% mc:prepare(store, Msg) should also be called from rabbit_stream_queue after converting to mc_amqp.
+%%
+%% When we received the message via AMQP 1.0, our mc_amqp:state() should ideally store a binary of each section.
+%% This way, prepare(store, Msg) wouldn't need to serialize anything because there shouldn't be any changes
+%% in the sections between receiving via AMQP 1.0 and storing the message in queues.
+%%
+%% Also, we don't need to parse each section.
+%% For example, apart from validation we wouldn’t need to parse application properties at all - unless requested by the headers exchange.
+%% Ideally the parser could have a validate mode, that validated the section(s) but didn’t build up an erlang term representation of the data.
+%% Such a validation mode could be used for application properties. Message annotations might not need to be parsed either.
+%% So, message annotations and application properties should be parsed lazily, only if needed.
+%%
+%% Upon sending the message to clients, when converting from AMQP 1.0, the serialized message needs to be parsed into sections.
 init(Sections) when is_list(Sections) ->
     Msg = decode(Sections, #msg{}),
     init(Msg);
 init(#msg{} = Msg) ->
-    %% TODO: as the essential annotations, durable, priority, ttl and delivery_count
-    %% is all we are interested in it isn't necessary to keep hold of the
-    %% incoming AMQP header inside the state
     Anns = essential_properties(Msg),
     {Msg, Anns}.
 
@@ -95,6 +113,10 @@ property(correlation_id, #msg{properties = #'v1_0.properties'{correlation_id = C
     Corr;
 property(message_id, #msg{properties = #'v1_0.properties'{message_id = MsgId}}) ->
     MsgId;
+property(user_id, #msg{properties = #'v1_0.properties'{user_id = UserId}}) ->
+    UserId;
+property(subject, #msg{properties = #'v1_0.properties'{subject = Subject}}) ->
+    Subject;
 property(_Prop, #msg{}) ->
     undefined.
 
@@ -134,7 +156,7 @@ get_property(timestamp, Msg) ->
     end;
 get_property(ttl, Msg) ->
     case Msg of
-        #msg{header = #'v1_0.header'{ttl = {_, Ttl}}} ->
+        #msg{header = #'v1_0.header'{ttl = {uint, Ttl}}} ->
             Ttl;
         _ ->
             %% fallback in case the source protocol was AMQP 0.9.1
@@ -170,10 +192,19 @@ convert_to(TargetProto, Msg, Env) ->
 serialize(Sections) ->
     encode_bin(Sections).
 
-protocol_state(Msg, Anns) ->
+protocol_state(Msg0 = #msg{header = Header0}, Anns) ->
+    Redelivered = maps:get(redelivered, Anns, false),
+    FirstAcquirer = not Redelivered,
+    Header = case Header0 of
+                 undefined ->
+                     #'v1_0.header'{first_acquirer = FirstAcquirer};
+                 #'v1_0.header'{} ->
+                     Header0#'v1_0.header'{first_acquirer = FirstAcquirer}
+             end,
+    Msg = Msg0#msg{header = Header},
+
     #{?ANN_EXCHANGE := Exchange,
       ?ANN_ROUTING_KEYS := [RKey | _]} = Anns,
-
     %% any x-* annotations get added as message annotations
     AnnsToAdd = maps:filter(fun (Key, _) -> mc_util:is_x_header(Key) end, Anns),
 

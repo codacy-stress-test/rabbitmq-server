@@ -25,7 +25,8 @@
          message/3,
          message/4,
          message/5,
-         from_basic_message/1
+         from_basic_message/1,
+         to_091/2
         ]).
 
 -import(rabbit_misc,
@@ -412,7 +413,7 @@ protocol_state(#content{properties = #'P_basic'{headers = H00} = B0} = C,
                  end, Headers0, Anns),
     Headers = case Headers1 of
                   [] ->
-                      undefined;
+                      H00;
                   _ ->
                       %% Dedup
                       lists:usort(fun({Key1, _, _}, {Key2, _, _}) ->
