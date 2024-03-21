@@ -5,10 +5,10 @@ load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository", "new_git_r
 
 http_archive(
     name = "rules_pkg",
-    sha256 = "8f9ee2dc10c1ae514ee599a8b42ed99fa262b757058f65ad3c384289ff70c4b8",
+    sha256 = "d250924a2ecc5176808fc4c25d5cf5e9e79e6346d79d5ab1c493e289e722d1d0",
     urls = [
-        "https://mirror.bazel.build/github.com/bazelbuild/rules_pkg/releases/download/0.9.1/rules_pkg-0.9.1.tar.gz",
-        "https://github.com/bazelbuild/rules_pkg/releases/download/0.9.1/rules_pkg-0.9.1.tar.gz",
+        "https://mirror.bazel.build/github.com/bazelbuild/rules_pkg/releases/download/0.10.1/rules_pkg-0.10.1.tar.gz",
+        "https://github.com/bazelbuild/rules_pkg/releases/download/0.10.1/rules_pkg-0.10.1.tar.gz",
     ],
 )
 
@@ -19,7 +19,7 @@ rules_pkg_dependencies()
 git_repository(
     name = "rules_erlang",
     remote = "https://github.com/rabbitmq/rules_erlang.git",
-    tag = "3.13.1",
+    tag = "3.15.0",
 )
 
 load("@rules_erlang//:internal_deps.bzl", "rules_erlang_internal_deps")
@@ -100,9 +100,9 @@ http_file(
 
 http_file(
     name = "otp_src_25_3",
-    downloaded_file_path = "OTP-25.3.2.9.tar.gz",
-    sha256 = "86fce5b418d127fb6049d69ecc1c32306128736d291e49077943cb3dcc73d7d5",
-    urls = ["https://github.com/erlang/otp/archive/OTP-25.3.2.9.tar.gz"],
+    downloaded_file_path = "OTP-25.3.2.10.tar.gz",
+    sha256 = "be76f05bd38c60df056ed35f01085f088474a1942ce1778c2217e5658d435b35",
+    urls = ["https://github.com/erlang/otp/archive/OTP-25.3.2.10.tar.gz"],
 )
 
 http_file(

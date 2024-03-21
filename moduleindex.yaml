@@ -1108,6 +1108,7 @@ rabbitmq_prometheus:
 - prometheus_rabbitmq_alarm_metrics_collector
 - prometheus_rabbitmq_core_metrics_collector
 - prometheus_rabbitmq_dynamic_collector
+- prometheus_rabbitmq_federation_collector
 - prometheus_rabbitmq_global_metrics_collector
 - rabbit_prometheus_app
 - rabbit_prometheus_dispatcher
@@ -1231,6 +1232,7 @@ rabbitmq_web_dispatch:
 - webmachine_log
 - webmachine_log_handler
 rabbitmq_web_mqtt:
+- Elixir.RabbitMQ.CLI.Ctl.Commands.ListWebMqttConnectionsCommand
 - rabbit_web_mqtt_app
 - rabbit_web_mqtt_handler
 - rabbit_web_mqtt_stream_handler

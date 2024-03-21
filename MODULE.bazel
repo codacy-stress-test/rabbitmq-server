@@ -5,17 +5,22 @@ module(
 
 bazel_dep(
     name = "rules_pkg",
-    version = "0.9.1",
+    version = "0.10.1",
 )
 
 bazel_dep(
     name = "bazel_skylib",
-    version = "1.4.2",
+    version = "1.5.0",
+)
+
+bazel_dep(
+    name = "aspect_bazel_lib",
+    version = "2.5.3",
 )
 
 bazel_dep(
     name = "platforms",
-    version = "0.0.7",
+    version = "0.0.8",
 )
 
 bazel_dep(
@@ -31,7 +36,7 @@ bazel_dep(
 
 bazel_dep(
     name = "rules_erlang",
-    version = "3.14.0",
+    version = "3.15.0",
 )
 
 bazel_dep(
@@ -54,48 +59,56 @@ erlang_config = use_extension(
 
 erlang_config.internal_erlang_from_github_release(
     name = "24",
+    extra_make_opts = ["-j 4"],
     sha256 = "8444ff9abe23aea268adbb95463561fc222c965052d35d7c950b17be01c3ad82",
     version = "24.3.4.6",
 )
 
 erlang_config.internal_erlang_from_github_release(
     name = "25_0",
+    extra_make_opts = ["-j 4"],
     sha256 = "8fc707f92a124b2aeb0f65dcf9ac8e27b2a305e7bcc4cc1b2fdf770eec0165bf",
     version = "25.0.4",
 )
 
 erlang_config.internal_erlang_from_github_release(
     name = "25_1",
+    extra_make_opts = ["-j 4"],
     sha256 = "1cd2fbe225a412009cda9b1fd9f3fff0293e75e3020daa48abf68721471e91eb",
     version = "25.1.2.1",
 )
 
 erlang_config.internal_erlang_from_github_release(
     name = "25_2",
+    extra_make_opts = ["-j 4"],
     sha256 = "f4d9f11d67ba478a053d72e635a44722a975603fe1284063fdf38276366bc61c",
     version = "25.2.3",
 )
 
 erlang_config.internal_erlang_from_github_release(
     name = "25_3",
-    sha256 = "b305190e01e84eddb26d0140637f26adf674c87351c679f3bbefc8685d22cc05",
-    version = "25.3.2.9",
+    extra_make_opts = ["-j 4"],
+    sha256 = "0a7338415c8eb6ae25664bfd1a10631c293838ef072665223a524831b823a8b7",
+    version = "25.3.2.10",
 )
 
 erlang_config.internal_erlang_from_github_release(
     name = "26_1",
+    extra_make_opts = ["-j 4"],
     sha256 = "f1074cf3a54f1f87e66027d5abebab2fa76a0243453fa58bc5f30d0ce0313921",
     version = "26.1.2",
 )
 
 erlang_config.internal_erlang_from_github_release(
     name = "26_2",
+    extra_make_opts = ["-j 4"],
     sha256 = "d537ff4ac5d8c1cb507aedaf7198fc1f155ea8aa65a8d83edb35c2802763cc28",
     version = "26.2.2",
 )
 
 erlang_config.internal_erlang_from_http_archive(
     name = "git_master",
+    extra_make_opts = ["-j 4"],
     strip_prefix = "otp-master",
     url = "https://github.com/erlang/otp/archive/refs/heads/master.tar.gz",
     version = "27",
@@ -189,8 +202,8 @@ erlang_package.hex_package(
     patch_cmds = [
         "rm ebin/cowboy.app",
     ],
-    sha256 = "0fa395437f1b0e104e0e00999f39d2ac5f4082ac5049b67a5b6d56ecc31b1403",
-    version = "2.11.0",
+    sha256 = "8a7abe6d183372ceb21caa2709bec928ab2b72e18a3911aa1771639bef82651e",
+    version = "2.12.0",
 )
 
 erlang_package.hex_package(
@@ -199,8 +212,8 @@ erlang_package.hex_package(
     patch_cmds = [
         "rm ebin/cowlib.app",
     ],
-    sha256 = "163b73f6367a7341b33c794c4e88e7dbfe6498ac42dcd69ef44c5bc5507c8db0",
-    version = "2.12.1",
+    sha256 = "e1e1284dc3fc030a64b1ad0d8382ae7e99da46c3246b815318a4b848873800a4",
+    version = "2.13.0",
 )
 
 erlang_package.hex_package(
