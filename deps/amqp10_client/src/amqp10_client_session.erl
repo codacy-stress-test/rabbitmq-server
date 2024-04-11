@@ -52,7 +52,6 @@
          diff/2]).
 
 -define(MAX_SESSION_WINDOW_SIZE, 65535).
--define(DEFAULT_TIMEOUT, 5000).
 -define(UINT_OUTGOING_WINDOW, {uint, ?UINT_MAX}).
 -define(INITIAL_OUTGOING_DELIVERY_ID, ?UINT_MAX).
 %% "The next-outgoing-id MAY be initialized to an arbitrary value" [2.5.6]
@@ -149,7 +148,7 @@
          reader :: pid(),
          socket :: amqp10_client_connection:amqp10_socket() | undefined,
          links = #{} :: #{output_handle() => #link{}},
-         link_index = #{} :: #{link_name() => output_handle()},
+         link_index = #{} :: #{{link_role(), link_name()} => output_handle()},
          link_handle_index = #{} :: #{input_handle() => output_handle()},
          next_link_handle = 0 :: output_handle(),
          early_attach_requests :: [term()],
@@ -172,7 +171,7 @@
 
 -spec begin_sync(pid()) -> supervisor:startchild_ret().
 begin_sync(Connection) ->
-    begin_sync(Connection, ?DEFAULT_TIMEOUT).
+    begin_sync(Connection, ?TIMEOUT).
 
 -spec begin_sync(pid(), non_neg_integer()) ->
     supervisor:startchild_ret() | session_timeout.
@@ -302,24 +301,28 @@ mapped(cast, #'v1_0.end'{error = Err}, State) ->
 mapped(cast, #'v1_0.attach'{name = {utf8, Name},
                             initial_delivery_count = IDC,
                             handle = {uint, InHandle},
+                            role = PeerRoleBool,
                             max_message_size = MaybeMaxMessageSize},
        #state{links = Links, link_index = LinkIndex,
               link_handle_index = LHI} = State0) ->
 
-    #{Name := OutHandle} = LinkIndex,
+    OurRoleBool = not PeerRoleBool,
+    OurRole = boolean_to_role(OurRoleBool),
+    LinkIndexKey = {OurRole, Name},
+    #{LinkIndexKey := OutHandle} = LinkIndex,
     #{OutHandle := Link0} = Links,
     ok = notify_link_attached(Link0),
 
     {DeliveryCount, MaxMessageSize} =
     case Link0 of
-        #link{role = sender,
+        #link{role = sender = OurRole,
               delivery_count = DC} ->
             MSS = case MaybeMaxMessageSize of
                       {ulong, S} when S > 0 -> S;
                       _ -> undefined
                   end,
             {DC, MSS};
-        #link{role = receiver,
+        #link{role = receiver = OurRole,
               max_message_size = MSS} ->
             {unpack(IDC), MSS}
     end,
@@ -327,8 +330,8 @@ mapped(cast, #'v1_0.attach'{name = {utf8, Name},
                       input_handle = InHandle,
                       delivery_count = DeliveryCount,
                       max_message_size = MaxMessageSize},
-    State = State0#state{links = Links#{OutHandle => Link},
-                         link_index = maps:remove(Name, LinkIndex),
+    State = State0#state{links = Links#{OutHandle := Link},
+                         link_index = maps:remove(LinkIndexKey, LinkIndex),
                          link_handle_index = LHI#{InHandle => OutHandle}},
     {keep_state, State};
 mapped(cast, #'v1_0.detach'{handle = {uint, InHandle},
@@ -648,8 +651,8 @@ build_frames(Channel, Trf, Payload, MaxPayloadSize, Acc) ->
 
 make_source(#{role := {sender, _}}) ->
     #'v1_0.source'{};
-make_source(#{role := {receiver, #{address := Address} = Target, _Pid}, filter := Filter}) ->
-    Durable = translate_terminus_durability(maps:get(durable, Target, none)),
+make_source(#{role := {receiver, #{address := Address} = Source, _Pid}, filter := Filter}) ->
+    Durable = translate_terminus_durability(maps:get(durable, Source, none)),
     TranslatedFilter = translate_filters(Filter),
     #'v1_0.source'{address = {utf8, Address},
                    durable = {uint, Durable},
@@ -659,7 +662,11 @@ make_target(#{role := {receiver, _Source, _Pid}}) ->
     #'v1_0.target'{};
 make_target(#{role := {sender, #{address := Address} = Target}}) ->
     Durable = translate_terminus_durability(maps:get(durable, Target, none)),
-    #'v1_0.target'{address = {utf8, Address},
+    TargetAddr = case is_binary(Address) of
+                     true -> {utf8, Address};
+                     false -> Address
+                 end,
+    #'v1_0.target'{address = TargetAddr,
                    durable = {uint, Durable}}.
 
 max_message_size(#{max_message_size := Size})
@@ -743,35 +750,34 @@ detach_with_error_cond(Link = #link{output_handle = OutHandle}, State, Cond) ->
     ok = send(Detach, State),
     Link#link{state = detach_sent}.
 
-send_attach(Send, #{name := Name, role := Role} = Args, {FromPid, _},
-      #state{next_link_handle = OutHandle0, links = Links,
+send_attach(Send, #{name := Name, role := RoleTuple} = Args, {FromPid, _},
+            #state{next_link_handle = OutHandle0, links = Links,
              link_index = LinkIndex} = State) ->
 
     Source = make_source(Args),
     Target = make_target(Args),
     Properties = amqp10_client_types:make_properties(Args),
 
-    {LinkTarget, RoleAsBool, InitialDeliveryCount, MaxMessageSize} =
-    case Role of
+    {LinkTarget, InitialDeliveryCount, MaxMessageSize} =
+    case RoleTuple of
         {receiver, _, Pid} ->
-            {{pid, Pid}, true, undefined, max_message_size(Args)};
+            {{pid, Pid}, undefined, max_message_size(Args)};
         {sender, #{address := TargetAddr}} ->
-            {TargetAddr, false, uint(?INITIAL_DELIVERY_COUNT), undefined}
+            {TargetAddr, uint(?INITIAL_DELIVERY_COUNT), undefined}
     end,
 
-    {OutHandle, NextLinkHandle} =
-    case Args of
-        #{handle := Handle} ->
-            %% Client app provided link handle.
-            %% Really only meant for integration tests.
-            {Handle, OutHandle0};
-        _ ->
-            {OutHandle0, OutHandle0 + 1}
-    end,
-
+    {OutHandle, NextLinkHandle} = case Args of
+                                      #{handle := Handle} ->
+                                          %% Client app provided link handle.
+                                          %% Really only meant for integration tests.
+                                          {Handle, OutHandle0};
+                                      _ ->
+                                          {OutHandle0, OutHandle0 + 1}
+                                  end,
+    Role = element(1, RoleTuple),
     % create attach performative
     Attach = #'v1_0.attach'{name = {utf8, Name},
-                            role = RoleAsBool,
+                            role = role_to_boolean(Role),
                             handle = {uint, OutHandle},
                             source = Source,
                             properties = Properties,
@@ -782,12 +788,12 @@ send_attach(Send, #{name := Name, role := Role} = Args, {FromPid, _},
                             max_message_size = MaxMessageSize},
     ok = Send(Attach, State),
 
-    LinkRef = make_link_ref(element(1, Role), self(), OutHandle),
+    Ref = make_link_ref(Role, self(), OutHandle),
     Link = #link{name = Name,
-                 ref = LinkRef,
+                 ref = Ref,
                  output_handle = OutHandle,
                  state = attach_sent,
-                 role = element(1, Role),
+                 role = Role,
                  notify = FromPid,
                  auto_flow = never,
                  target = LinkTarget,
@@ -796,7 +802,7 @@ send_attach(Send, #{name := Name, role := Role} = Args, {FromPid, _},
 
     {State#state{links = Links#{OutHandle => Link},
                  next_link_handle = NextLinkHandle,
-                 link_index = LinkIndex#{Name => OutHandle}}, LinkRef}.
+                 link_index = LinkIndex#{{Role, Name} => OutHandle}}, Ref}.
 
 -spec handle_session_flow(#'v1_0.flow'{}, #state{}) -> #state{}.
 handle_session_flow(#'v1_0.flow'{next_incoming_id = MaybeNII,
@@ -830,7 +836,7 @@ handle_link_flow(#'v1_0.flow'{delivery_count = MaybeTheirDC,
                   {uint, DC} -> DC;
                   undefined -> ?INITIAL_DELIVERY_COUNT
               end,
-    LinkCredit = diff(add(TheirDC, TheirCredit), OurDC),
+    LinkCredit = amqp10_util:link_credit_snd(TheirDC, TheirCredit, OurDC),
     {ok, Link#link{link_credit = LinkCredit}};
 handle_link_flow(#'v1_0.flow'{delivery_count = TheirDC,
                               link_credit = {uint, TheirCredit},
@@ -1090,6 +1096,16 @@ sym(B) when is_atom(B) -> {symbol, atom_to_binary(B, utf8)}.
 reason(undefined) -> normal;
 reason(Other) -> Other.
 
+role_to_boolean(sender) ->
+    ?AMQP_ROLE_SENDER;
+role_to_boolean(receiver) ->
+    ?AMQP_ROLE_RECEIVER.
+
+boolean_to_role(?AMQP_ROLE_SENDER) ->
+    sender;
+boolean_to_role(?AMQP_ROLE_RECEIVER) ->
+    receiver.
+
 format_status(Status = #{data := Data0}) ->
     #state{channel = Channel,
            remote_channel = RemoteChannel,
@@ -1203,24 +1219,29 @@ handle_session_flow_pre_begin_test() ->
     ?assertEqual(998 - 51, State#state.remote_incoming_window).
 
 handle_link_flow_sender_test() ->
-    Handle = 45,
-    DeliveryCount = 55,
-    Link = #link{role = sender, output_handle = 99,
-                 link_credit = 0, delivery_count = DeliveryCount + 2},
-    Flow = #'v1_0.flow'{handle = {uint, Handle},
-                        link_credit = {uint, 42},
-                        delivery_count = {uint, DeliveryCount}
+    DeliveryCountRcv = 55,
+    DeliveryCountSnd = DeliveryCountRcv + 2,
+    LinkCreditRcv = 42,
+    Link = #link{role = sender,
+                 output_handle = 99,
+                 link_credit = 0,
+                 delivery_count = DeliveryCountSnd},
+    Flow = #'v1_0.flow'{handle = {uint, 45},
+                        link_credit = {uint, LinkCreditRcv},
+                        delivery_count = {uint, DeliveryCountRcv}
                        },
     {ok, Outcome} = handle_link_flow(Flow, Link),
     % see section 2.6.7
-    ?assertEqual(DeliveryCount + 42 - (DeliveryCount + 2), Outcome#link.link_credit),
+    ?assertEqual(DeliveryCountRcv + LinkCreditRcv - DeliveryCountSnd,
+                 Outcome#link.link_credit),
 
     % receiver does not yet know the delivery_count
     {ok, Outcome2} = handle_link_flow(Flow#'v1_0.flow'{delivery_count = undefined},
                                       Link),
     % using serial number arithmetic:
-    % ?INITIAL_DELIVERY_COUNT + 42 - (DeliveryCount + 2) = -18
-    ?assertEqual(-18, Outcome2#link.link_credit).
+    % ?INITIAL_DELIVERY_COUNT + LinkCreditRcv - DeliveryCountSnd = -18
+    % but we maintain a floor of zero
+    ?assertEqual(0, Outcome2#link.link_credit).
 
 handle_link_flow_sender_drain_test() ->
     Handle = 45,

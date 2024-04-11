@@ -47,6 +47,7 @@ def all_beam_files(name = "all_beam_files"):
             "src/rabbit_access_control.erl",
             "src/rabbit_alarm.erl",
             "src/rabbit_amqp1_0.erl",
+            "src/rabbit_amqp_management.erl",
             "src/rabbit_amqp_reader.erl",
             "src/rabbit_amqp_session.erl",
             "src/rabbit_amqp_session_sup.erl",
@@ -315,6 +316,7 @@ def all_test_beam_files(name = "all_test_beam_files"):
             "src/rabbit_access_control.erl",
             "src/rabbit_alarm.erl",
             "src/rabbit_amqp1_0.erl",
+            "src/rabbit_amqp_management.erl",
             "src/rabbit_amqp_reader.erl",
             "src/rabbit_amqp_session.erl",
             "src/rabbit_amqp_session_sup.erl",
@@ -598,6 +600,7 @@ def all_srcs(name = "all_srcs"):
             "src/rabbit_access_control.erl",
             "src/rabbit_alarm.erl",
             "src/rabbit_amqp1_0.erl",
+            "src/rabbit_amqp_management.erl",
             "src/rabbit_amqp_reader.erl",
             "src/rabbit_amqp_session.erl",
             "src/rabbit_amqp_session_sup.erl",
@@ -2089,15 +2092,7 @@ def test_suite_beam_files(name = "test_suite_beam_files"):
         erlc_opts = "//:test_erlc_opts",
         deps = ["//deps/amqp_client:erlang_app", "//deps/rabbitmq_ct_helpers:erlang_app"],
     )
-    erlang_bytecode(
-        name = "message_containers_SUITE_beam_files",
-        testonly = True,
-        srcs = ["test/message_containers_SUITE.erl"],
-        outs = ["test/message_containers_SUITE.beam"],
-        app_name = "rabbit",
-        erlc_opts = "//:test_erlc_opts",
-        deps = ["//deps/amqp_client:erlang_app"],
-    )
+
     erlang_bytecode(
         name = "metadata_store_clustering_SUITE_beam_files",
         testonly = True,
@@ -2216,4 +2211,13 @@ def test_suite_beam_files(name = "test_suite_beam_files"):
         app_name = "rabbit",
         erlc_opts = "//:test_erlc_opts",
         deps = ["//deps/rabbit_common:erlang_app"],
+    )
+    erlang_bytecode(
+        name = "amqp_address_SUITE_beam_files",
+        testonly = True,
+        srcs = ["test/amqp_address_SUITE.erl"],
+        outs = ["test/amqp_address_SUITE.beam"],
+        app_name = "rabbit",
+        erlc_opts = "//:test_erlc_opts",
+        deps = ["//deps/amqp10_common:erlang_app", "//deps/rabbitmq_amqp_client:erlang_app"],
     )

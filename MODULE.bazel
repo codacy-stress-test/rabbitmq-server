@@ -29,6 +29,16 @@ bazel_dep(
 )
 
 bazel_dep(
+    name = "rules_oci",
+    version = "1.7.4",
+)
+
+bazel_dep(
+    name = "container_structure_test",
+    version = "1.16.0",
+)
+
+bazel_dep(
     name = "gazelle",
     version = "0.33.0",
     repo_name = "bazel_gazelle",
@@ -296,8 +306,8 @@ erlang_package.hex_package(
 erlang_package.hex_package(
     name = "khepri",
     build_file = "@rabbitmq-server//bazel:BUILD.khepri",
-    sha256 = "0b6ff09fabf27cb1e8df0f976149305ad936abd17233263b36ccc7becbf31cb3",
-    version = "0.12.1",
+    sha256 = "1157d963eb5c002e040bbc86348669818d1da86d259a3705008655fefbd7f1c2",
+    version = "0.13.0",
 )
 
 erlang_package.hex_package(
@@ -529,7 +539,7 @@ secondary_umbrella = use_extension(
 
 use_repo(
     secondary_umbrella,
-    "rabbitmq-server-generic-unix-3.12",
+    "rabbitmq-server-generic-unix-3.13",
 )
 
 hex = use_extension(

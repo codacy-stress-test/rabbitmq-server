@@ -20,7 +20,7 @@ load(
 
 APP_NAME = "amqp10_client"
 
-APP_DESCRIPTION = "AMQP 1.0 client from the RabbitMQ Project"
+APP_DESCRIPTION = "AMQP 1.0 client"
 
 APP_MODULE = "amqp10_client_app"
 

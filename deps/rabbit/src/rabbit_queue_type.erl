@@ -18,6 +18,7 @@
          close/1,
          discover/1,
          feature_flag_name/1,
+         to_binary/1,
          default/0,
          is_enabled/1,
          is_compatible/4,
@@ -71,8 +72,7 @@
 -type queue_type() :: rabbit_classic_queue | rabbit_quorum_queue | rabbit_stream_queue.
 %% see AMQP 1.0 §2.6.7
 -type delivery_count() :: sequence_no().
-%% Link credit can be negative, see AMQP 1.0 §2.6.7
--type credit() :: integer().
+-type credit() :: uint().
 
 -define(STATE, ?MODULE).
 
@@ -276,6 +276,16 @@ feature_flag_name(_) ->
 
 default() ->
     rabbit_classic_queue.
+
+-spec to_binary(module()) -> binary().
+to_binary(rabbit_classic_queue) ->
+    <<"classic">>;
+to_binary(rabbit_quorum_queue) ->
+    <<"quorum">>;
+to_binary(rabbit_stream_queue) ->
+    <<"stream">>;
+to_binary(Other) ->
+    atom_to_binary(Other).
 
 %% is a specific queue type implementation enabled
 -spec is_enabled(module()) -> boolean().

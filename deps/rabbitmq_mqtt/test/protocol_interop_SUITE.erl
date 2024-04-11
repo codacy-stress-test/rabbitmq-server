@@ -31,10 +31,11 @@ all() ->
 groups() ->
     [{tests, [shuffle],
       [
-       amqpl,
-       amqp,
-       stomp,
-       stream
+       mqtt_amqpl_mqtt,
+       mqtt_amqp_mqtt,
+       amqp_mqtt_amqp,
+       mqtt_stomp_mqtt,
+       mqtt_stream
       ]
      }].
 
@@ -84,7 +85,7 @@ end_per_testcase(Testcase, Config) ->
 %% Testsuite cases
 %% -------------------------------------------------------------------
 
-amqpl(Config) ->
+mqtt_amqpl_mqtt(Config) ->
     Q = ClientId = atom_to_binary(?FUNCTION_NAME),
     Ch = rabbit_ct_client_helpers:open_channel(Config),
     #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = Q}),
@@ -148,7 +149,7 @@ amqpl(Config) ->
 
     ok = emqtt:disconnect(C).
 
-amqp(Config) ->
+mqtt_amqp_mqtt(Config) ->
     Host = ?config(rmq_hostname, Config),
     Port = rabbit_ct_broker_helpers:get_node_config(Config, 0, tcp_port_amqp),
     ClientId = Container = atom_to_binary(?FUNCTION_NAME),
@@ -158,10 +159,14 @@ amqp(Config) ->
                 sasl => {plain, <<"guest">>, <<"guest">>}},
     {ok, Connection1} = amqp10_client:open_connection(OpnConf),
     {ok, Session1} = amqp10_client:begin_session(Connection1),
-    ReceiverLinkName = <<"test-receiver">>,
+    {ok, LinkPair} = rabbitmq_amqp_client:attach_management_link_pair_sync(Session1, <<"pair">>),
+    QName = <<"queue for AMQP 1.0 client">>,
+    {ok, _} = rabbitmq_amqp_client:declare_queue(LinkPair, QName, #{}),
+    ok = rabbitmq_amqp_client:bind_queue(LinkPair, QName, <<"amq.topic">>, <<"topic.1">>, #{}),
+    ok = rabbitmq_amqp_client:detach_management_link_pair_sync(LinkPair),
     {ok, Receiver} = amqp10_client:attach_receiver_link(
-                       Session1, ReceiverLinkName, <<"/topic/topic.1">>, unsettled,
-                       configuration),
+                       Session1, <<"test-receiver">>, <<"/queue/", QName/binary>>,
+                       unsettled, configuration),
 
     %% MQTT 5.0 to AMQP 1.0
     C = connect(ClientId, Config),
@@ -208,7 +213,7 @@ amqp(Config) ->
     #{correlation_id := Correlation,
       content_type := ContentType,
       reply_to := ReplyToAddress} = amqp10_msg:properties(Msg1),
-    ?assertEqual(<<"/exchange/amq.topic/response.topic">>, ReplyToAddress),
+    ?assertEqual(<<"/exchange/amq.topic/key/response.topic">>, ReplyToAddress),
 
     %% Thanks to the 'Payload-Format-Indicator', we get a single utf8 value.
     ?assertEqual(#'v1_0.amqp_value'{content = {utf8, RequestPayload}}, amqp10_msg:body(Msg1)),
@@ -264,7 +269,68 @@ amqp(Config) ->
     end,
     ok = emqtt:disconnect(C).
 
-stomp(Config) ->
+amqp_mqtt_amqp(Config) ->
+    Correlation = QName = ClientId = Container = atom_to_binary(?FUNCTION_NAME),
+
+    C = connect(ClientId, Config),
+    {ok, _, [1]} = emqtt:subscribe(C, <<"t/1">>, qos1),
+
+    Host = ?config(rmq_hostname, Config),
+    Port = rabbit_ct_broker_helpers:get_node_config(Config, 0, tcp_port_amqp),
+    OpnConf = #{address => Host,
+                port => Port,
+                container_id => Container,
+                sasl => {plain, <<"guest">>, <<"guest">>}},
+    {ok, Connection} = amqp10_client:open_connection(OpnConf),
+    {ok, Session} = amqp10_client:begin_session(Connection),
+    {ok, LinkPair} = rabbitmq_amqp_client:attach_management_link_pair_sync(Session, <<"pair">>),
+    {ok, _} = rabbitmq_amqp_client:declare_queue(LinkPair, QName, #{}),
+    ok = rabbitmq_amqp_client:bind_queue(LinkPair, QName, <<"amq.topic">>, <<"t.2">>, #{}),
+    ok = rabbitmq_amqp_client:detach_management_link_pair_sync(LinkPair),
+    {ok, Receiver} = amqp10_client:attach_receiver_link(Session, <<"receiver">>, <<"/queue/", QName/binary>>),
+
+    %% AMQP 1.0 to MQTT 5.0
+    {ok, Sender} = amqp10_client:attach_sender_link(Session, <<"sender">>, <<"/exchange/amq.topic/key/t.1">>),
+    receive {amqp10_event, {link, Sender, credited}} -> ok
+    after 2000 -> ct:fail(credited_timeout)
+    end,
+    RequestBody = <<"my request">>,
+
+    Msg1 = amqp10_msg:set_headers(
+             #{durable => true},
+             amqp10_msg:set_properties(
+               #{correlation_id => Correlation,
+                 reply_to => <<"/exchange/amq.topic/key/t.2">>},
+               amqp10_msg:new(<<>>, RequestBody, true))),
+    ok = amqp10_client:send_msg(Sender, Msg1),
+
+    RespTopic = receive {publish, MqttMsg} ->
+                            ct:pal("Received MQTT message:~n~p", [MqttMsg]),
+                            #{client_pid := C,
+                              qos := 1,
+                              topic := <<"t/1">>,
+                              payload := RequestBody,
+                              properties := #{'Correlation-Data' := Correlation,
+                                              'Response-Topic' := ResponseTopic}} = MqttMsg,
+                            ResponseTopic
+                after 2000 -> ct:fail("did not receive request")
+                end,
+
+    %% MQTT 5.0 to AMQP 1.0
+    RespBody = <<"my response">>,
+    {ok, _} = emqtt:publish(C, RespTopic,
+                            #{'Correlation-Data' => Correlation},
+                            RespBody, [{qos, 1}]),
+
+    {ok, Msg2} = amqp10_client:get_msg(Receiver),
+    ct:pal("Received AMQP 1.0 message:~n~p", [Msg2]),
+    ?assertEqual(RespBody, amqp10_msg:body_bin(Msg2)),
+
+    ok = emqtt:disconnect(C),
+    ok = amqp10_client:end_session(Session),
+    ok = amqp10_client:close_connection(Connection).
+
+mqtt_stomp_mqtt(Config) ->
     {ok, StompC0} = stomp_connect(Config),
     ok = stomp_send(StompC0, "SUBSCRIBE", [{"destination", "/topic/t.1"},
                                            {"receipt", "my-receipt"},
@@ -349,7 +415,7 @@ stomp(Config) ->
 
 %% The stream test case is one-way because an MQTT client can publish to a stream,
 %% but not consume (directly) from a stream.
-stream(Config) ->
+mqtt_stream(Config) ->
     Q = ClientId = atom_to_binary(?FUNCTION_NAME),
     Ch = rabbit_ct_client_helpers:open_channel(Config),
 
@@ -449,9 +515,9 @@ stream(Config) ->
                  amqp10_msg:message_annotations(Msg)),
     ?assertEqual(#{correlation_id => Correlation,
                    content_type => ContentType,
-                   %% We expect that reply_to contains a valid address,
+                   %% We expect that reply_to contains a valid AMQP 1.0 address,
                    %% and that the topic format got translated from MQTT to AMQP 0.9.1.
-                   reply_to => <<"/exchange/amq.topic/response.topic">>},
+                   reply_to => <<"/exchange/amq.topic/key/response.topic">>},
                  amqp10_msg:properties(Msg)),
     ?assertEqual(#{<<"rabbit🐇"/utf8>> => <<"carrot🥕"/utf8>>,
                    <<"key">> => <<"val">>},

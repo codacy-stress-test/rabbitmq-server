@@ -24,9 +24,9 @@
 -export([
          message/3,
          message/4,
-         message/5,
          from_basic_message/1,
-         to_091/2
+         to_091/2,
+         from_091/2
         ]).
 
 -import(rabbit_misc,
@@ -149,6 +149,8 @@ convert_from(mc_amqp, Sections, _Env) ->
     %% Add remaining x- message annotations as headers
     XHeaders = lists:filtermap(fun({{symbol, <<"x-cc">>}, V}) ->
                                        {true, to_091(<<"CC">>, V)};
+                                  ({{symbol, <<"x-opt-rabbitmq-received-time">>}, {timestamp, Ts}}) ->
+                                       {true, {<<"timestamp_in_ms">>, long, Ts}};
                                   ({{symbol, <<"x-", _/binary>> = K}, V})
                                     when ?IS_SHORTSTR_LEN(K) ->
                                        case is_internal_header(K) of
@@ -456,16 +458,13 @@ protocol_state(Content0, Anns) ->
 message(ExchangeName, RoutingKey, Content) ->
     message(ExchangeName, RoutingKey, Content, #{}).
 
+%% helper for creating message container from messages received from AMQP legacy
 -spec message(rabbit_types:exchange_name(), rabbit_types:routing_key(), #content{}, map()) ->
     {ok, mc:state()} | {error, Reason :: any()}.
-message(XName, RoutingKey, Content, Anns) ->
-    message(XName, RoutingKey, Content, Anns,
-            rabbit_feature_flags:is_enabled(message_containers)).
-
-%% helper for creating message container from messages received from
-%% AMQP legacy
-message(#resource{name = ExchangeNameBin}, RoutingKey,
-        #content{properties = Props} = Content, Anns, true)
+message(#resource{name = ExchangeNameBin},
+        RoutingKey,
+        #content{properties = Props} = Content,
+        Anns)
   when is_binary(RoutingKey) andalso
        is_map(Anns) ->
     case rabbit_basic:header_routes(Props#'P_basic'.headers) of
@@ -476,19 +475,6 @@ message(#resource{name = ExchangeNameBin}, RoutingKey,
                          rabbit_basic:strip_bcc_header(Content),
                          Anns#{?ANN_ROUTING_KEYS => [RoutingKey | HeaderRoutes],
                                ?ANN_EXCHANGE => ExchangeNameBin})}
-    end;
-message(#resource{} = XName, RoutingKey,
-        #content{} = Content, Anns, false) ->
-    case rabbit_basic:message(XName, RoutingKey, Content) of
-        {ok, Msg} ->
-            case Anns of
-                #{id := Id} ->
-                    {ok, Msg#basic_message{id = Id}};
-                _ ->
-                    {ok, Msg}
-            end;
-        {error, _} = Error ->
-            Error
     end.
 
 from_basic_message(#basic_message{content = Content,
@@ -501,7 +487,7 @@ from_basic_message(#basic_message{content = Content,
                _ ->
                    #{id => Id}
            end,
-    {ok, Msg} = message(Ex, RKey, prepare(read, Content), Anns, true),
+    {ok, Msg} = message(Ex, RKey, prepare(read, Content), Anns),
     Msg.
 
 %% Internal
