@@ -1014,6 +1014,20 @@ do_run_postlaunch_phase(Plugins) ->
         ?LOG_DEBUG(""),
         ?LOG_DEBUG("== Plugins (postlaunch phase) =="),
 
+        %% Before loading plugins, set the prometheus collectors and
+        %% instrumenters to the empty list. By default, prometheus will attempt
+        %% to find all implementers of its collector and instrumenter
+        %% behaviours by scanning all available modules during application
+        %% start. This can take significant time (on the order of seconds) due
+        %% to the large number of modules available.
+        %%
+        %% * Collectors: the `rabbitmq_prometheus' plugin explicitly registers
+        %%   all collectors.
+        %% * Instrumenters: no instrumenters are used.
+        _ = application:load(prometheus),
+        ok = application:set_env(prometheus, collectors, [default]),
+        ok = application:set_env(prometheus, instrumenters, []),
+
         %% However, we want to run their boot steps and actually start
         %% them one by one, to ensure a dependency is fully started
         %% before a plugin which depends on it gets a chance to start.
@@ -1298,10 +1312,11 @@ print_banner() ->
               "~n  TLS Library: ~ts"
               "~n  Release series support status: ~ts"
               "~n"
-              "~n  Doc guides:  https://www.rabbitmq.com/docs/documentation"
+              "~n  Doc guides:  https://www.rabbitmq.com/docs"
               "~n  Support:     https://www.rabbitmq.com/docs/contact"
               "~n  Tutorials:   https://www.rabbitmq.com/tutorials"
               "~n  Monitoring:  https://www.rabbitmq.com/docs/monitoring"
+              "~n  Upgrading:   https://www.rabbitmq.com/docs/upgrade"
               "~n"
               "~n  Logs: ~ts" ++ LogFmt ++ "~n"
               "~n  Config file(s): ~ts" ++ CfgFmt ++ "~n"
@@ -1319,7 +1334,7 @@ maybe_warn_about_release_series_eol() ->
             %% we intentionally log this as an error for increased visibiity
             ?LOG_ERROR("This release series has reached end of life "
                        "and is no longer supported. "
-                       "Please visit https://rabbitmq.com/versions.html "
+                       "Please visit https://www.rabbitmq.com/release-information "
                        "to learn more and upgrade");
         _ -> ok
     end.
