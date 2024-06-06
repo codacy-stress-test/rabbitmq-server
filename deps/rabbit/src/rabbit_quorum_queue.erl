@@ -25,7 +25,7 @@
          delete_immediately/1]).
 -export([state_info/1, info/2, stat/1, infos/1, infos/2]).
 -export([settle/5, dequeue/5, consume/3, cancel/5]).
--export([credit_v1/5, credit/7]).
+-export([credit_v1/5, credit/6]).
 -export([purge/1]).
 -export([stateless_deliver/2, deliver/3]).
 -export([dead_letter_publish/5]).
@@ -552,6 +552,12 @@ handle_tick(QName,
                            | info(Q, Keys)],
                   rabbit_core_metrics:queue_stats(QName, Infos),
                   ok = repair_leader_record(Q, Self),
+                  case repair_amqqueue_nodes(Q) of
+                      ok ->
+                          ok;
+                      repaired ->
+                          rabbit_log:debug("Repaired quorum queue ~ts amqqueue record", [rabbit_misc:rs(QName)])
+                  end,
                   ExpectedNodes = rabbit_nodes:list_members(),
                   case Nodes -- ExpectedNodes of
                       [] ->
@@ -604,8 +610,8 @@ repair_amqqueue_nodes(QName = #resource{}) ->
     repair_amqqueue_nodes(Q0);
 repair_amqqueue_nodes(Q0) ->
     QName = amqqueue:get_name(Q0),
-    Leader = amqqueue:get_pid(Q0),
-    {ok, Members, _} = ra:members(Leader),
+    {Name, _} = amqqueue:get_pid(Q0),
+    Members = ra_leaderboard:lookup_members(Name),
     RaNodes = [N || {_, N} <- Members],
     #{nodes := Nodes} = amqqueue:get_type_state(Q0),
     case lists:sort(RaNodes) =:= lists:sort(Nodes) of
@@ -804,8 +810,8 @@ settle(_QName, discard, CTag, MsgIds, QState) ->
 credit_v1(_QName, CTag, Credit, Drain, QState) ->
     rabbit_fifo_client:credit_v1(quorum_ctag(CTag), Credit, Drain, QState).
 
-credit(_QName, CTag, DeliveryCount, Credit, Drain, Echo, QState) ->
-    rabbit_fifo_client:credit(quorum_ctag(CTag), DeliveryCount, Credit, Drain, Echo, QState).
+credit(_QName, CTag, DeliveryCount, Credit, Drain, QState) ->
+    rabbit_fifo_client:credit(quorum_ctag(CTag), DeliveryCount, Credit, Drain, QState).
 
 -spec dequeue(rabbit_amqqueue:name(), NoAck :: boolean(), pid(),
               rabbit_types:ctag(), rabbit_fifo_client:state()) ->
