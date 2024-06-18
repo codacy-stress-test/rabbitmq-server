@@ -25,13 +25,15 @@ ifeq ($(PLATFORM),msys2)
 RABBITMQ_PLUGINS ?= $(RABBITMQ_SCRIPTS_DIR)/rabbitmq-plugins.bat
 RABBITMQ_SERVER ?= $(RABBITMQ_SCRIPTS_DIR)/rabbitmq-server.bat
 RABBITMQCTL ?= $(RABBITMQ_SCRIPTS_DIR)/rabbitmqctl.bat
+RABBITMQ_UPGRADE ?= $(RABBITMQ_SCRIPTS_DIR)/rabbitmq-upgrade.bat
 else
 RABBITMQ_PLUGINS ?= $(RABBITMQ_SCRIPTS_DIR)/rabbitmq-plugins
 RABBITMQ_SERVER ?= $(RABBITMQ_SCRIPTS_DIR)/rabbitmq-server
 RABBITMQCTL ?= $(RABBITMQ_SCRIPTS_DIR)/rabbitmqctl
+RABBITMQ_UPGRADE ?= $(RABBITMQ_SCRIPTS_DIR)/rabbitmq-upgrade
 endif
 
-export RABBITMQ_SCRIPTS_DIR RABBITMQCTL RABBITMQ_PLUGINS RABBITMQ_SERVER
+export RABBITMQ_SCRIPTS_DIR RABBITMQCTL RABBITMQ_PLUGINS RABBITMQ_SERVER RABBITMQ_UPGRADE
 
 # We export MAKE to be sure scripts and tests use the proper command.
 export MAKE
@@ -96,16 +98,22 @@ RABBITMQ_ENABLED_PLUGINS_FILE ?= $(call node_enabled_plugins_file,$(RABBITMQ_NOD
 RABBITMQ_LOG ?= debug,+color
 export RABBITMQ_LOG
 
-# erlang.mk adds dependencies' ebin directory to ERL_LIBS. This is
-# a sane default, but we prefer to rely on the .ez archives in the
-# `plugins` directory so the plugin code is executed. The `plugins`
-# directory is added to ERL_LIBS by rabbitmq-env.
-DIST_ERL_LIBS = $(patsubst :%,%,$(patsubst %:,%,$(subst :$(APPS_DIR):,:,$(subst :$(DEPS_DIR):,:,:$(ERL_LIBS):))))
+FAST_RUN_BROKER ?= 1
+
+ifeq ($(FAST_RUN_BROKER),1)
+DIST_TARGET = $(if $(NOBUILD),,all)
+PLUGINS_FROM_DEPS_DIR = 1
+endif
 
 ifdef PLUGINS_FROM_DEPS_DIR
-RMQ_PLUGINS_DIR=$(DEPS_DIR)
+RMQ_PLUGINS_DIR = $(DEPS_DIR)
+DIST_ERL_LIBS = $(ERL_LIBS)
 else
-RMQ_PLUGINS_DIR=$(CURDIR)/$(DIST_DIR)
+RMQ_PLUGINS_DIR = $(CURDIR)/$(DIST_DIR)
+# We do not want to add apps/ or deps/ to ERL_LIBS
+# when running the release from dist. The `plugins`
+# directory is added to ERL_LIBS by rabbitmq-env.
+DIST_ERL_LIBS = $(patsubst :%,%,$(patsubst %:,%,$(subst :$(APPS_DIR):,:,$(subst :$(DEPS_DIR):,:,:$(ERL_LIBS):))))
 endif
 
 node_plugins_dir = $(if $(RABBITMQ_PLUGINS_DIR),$(RABBITMQ_PLUGINS_DIR),$(if $(EXTRA_PLUGINS_DIR),$(EXTRA_PLUGINS_DIR):$(RMQ_PLUGINS_DIR),$(RMQ_PLUGINS_DIR)))
@@ -157,7 +165,14 @@ virgin-node-tmpdir:
 ifdef LEAVE_PLUGINS_DISABLED
 RABBITMQ_ENABLED_PLUGINS ?=
 else
+# When running "make -C deps/plugin run-broker" we only want
+# "plugin" to be enabled. See rabbitmq-components.mk for where
+# this variable comes from.
+ifdef deps_dir_overriden
+RABBITMQ_ENABLED_PLUGINS ?= $(filter-out rabbit,$(PROJECT))
+else
 RABBITMQ_ENABLED_PLUGINS ?= ALL
+endif
 endif
 
 # --------------------------------------------------------------------
@@ -407,6 +422,71 @@ stop-brokers stop-cluster:
 		nodename="rabbit-$$n@$(HOSTNAME)"; \
 		$(MAKE) stop-node \
 		  RABBITMQ_NODENAME="$$nodename" & \
+	done; \
+	wait
+
+NODES ?= 3
+
+# Rolling restart similar to what the Kubernetes Operator does
+restart-cluster:
+	@for n in $$(seq $(NODES) -1 1); do \
+		nodename="rabbit-$$n@$(HOSTNAME)"; \
+		$(RABBITMQ_UPGRADE) -n "$$nodename" await_online_quorum_plus_one -t 604800 && \
+			$(RABBITMQ_UPGRADE) -n "$$nodename" drain; \
+		$(MAKE) stop-node \
+		  RABBITMQ_NODENAME="$$nodename"; \
+		$(MAKE) start-background-broker \
+		  NOBUILD=1 \
+		  RABBITMQ_NODENAME="$$nodename" \
+		  RABBITMQ_NODE_PORT="$$((5672 + $$n - 1))" \
+		  RABBITMQ_SERVER_START_ARGS=" \
+		  -rabbit loopback_users [] \
+		  -rabbitmq_management listener [{port,$$((15672 + $$n - 1))}] \
+		  -rabbitmq_mqtt tcp_listeners [$$((1883 + $$n - 1))] \
+		  -rabbitmq_web_mqtt tcp_config [{port,$$((1893 + $$n - 1))}] \
+		  -rabbitmq_web_mqtt_examples listener [{port,$$((1903 + $$n - 1))}] \
+		  -rabbitmq_stomp tcp_listeners [$$((61613 + $$n - 1))] \
+		  -rabbitmq_web_stomp tcp_config [{port,$$((61623 + $$n - 1))}] \
+		  -rabbitmq_web_stomp_examples listener [{port,$$((61633 + $$n - 1))}] \
+		  -rabbitmq_prometheus tcp_config [{port,$$((15692 + $$n - 1))}] \
+		  -rabbitmq_stream tcp_listeners [$$((5552 + $$n - 1))] \
+		  " & \
+	done; \
+	wait
+
+# --------------------------------------------------------------------
+# Code reloading.
+#
+# For `make run-broker` either do:
+# * make RELOAD=1
+# * make all reload-broker        (can't do this alongside -j flag)
+# * make && make reload-broker    (fine with -j flag)
+#
+# Or if recompiling a specific application:
+# * make -C deps/rabbit RELOAD=1
+#
+# For `make start-cluster` use the `reload-cluster` target.
+# Same constraints apply as with `reload-broker`:
+# * make all reload-cluster
+# * make && make reload-cluster
+# --------------------------------------------------------------------
+
+reload-broker:
+	$(exec_verbose) ERL_LIBS="$(DIST_ERL_LIBS)" \
+		$(RABBITMQCTL) -n $(RABBITMQ_NODENAME) \
+		eval "io:format(\"~p~n\", [c:lm()])."
+
+ifeq ($(MAKELEVEL),0)
+ifdef RELOAD
+all:: reload-broker
+endif
+endif
+
+reload-cluster:
+	@for n in $$(seq $(NODES) -1 1); do \
+		nodename="rabbit-$$n@$(HOSTNAME)"; \
+		$(MAKE) reload-broker \
+			RABBITMQ_NODENAME="$$nodename" & \
 	done; \
 	wait
 

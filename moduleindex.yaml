@@ -647,6 +647,7 @@ rabbit:
 - rabbit_exchange_type_fanout
 - rabbit_exchange_type_headers
 - rabbit_exchange_type_invalid
+- rabbit_exchange_type_local_random
 - rabbit_exchange_type_topic
 - rabbit_feature_flags
 - rabbit_ff_controller
@@ -685,7 +686,6 @@ rabbit:
 - rabbit_mirror_queue_misc
 - rabbit_mnesia
 - rabbit_msg_store
-- rabbit_msg_store_ets_index
 - rabbit_msg_store_gc
 - rabbit_networking
 - rabbit_networking_store
@@ -754,6 +754,7 @@ rabbit:
 - rabbit_vhost_sup
 - rabbit_vhost_sup_sup
 - rabbit_vhost_sup_wrapper
+- rabbit_vhosts
 - rabbit_vm
 - supervised_lifecycle
 - tcp_listener
@@ -800,7 +801,6 @@ rabbit_common:
 - rabbit_json
 - rabbit_log
 - rabbit_misc
-- rabbit_msg_store_index
 - rabbit_net
 - rabbit_nodes_common
 - rabbit_numerical

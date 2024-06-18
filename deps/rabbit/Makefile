@@ -19,7 +19,6 @@ define PROJECT_ENV
 	    {vm_memory_calculation_strategy, rss},
 	    {memory_monitor_interval, 2500},
 	    {disk_free_limit, 50000000}, %% 50MB
-	    {msg_store_index_module, rabbit_msg_store_ets_index},
 	    {backing_queue_module, rabbit_variable_queue},
 	    %% 0 ("no limit") would make a better default, but that
 	    %% breaks the QPid Java client
@@ -112,19 +111,22 @@ define PROJECT_ENV
 	    {default_consumer_prefetch, {false, 0}},
 		  %% interval at which the channel can perform periodic actions
 	    {channel_tick_interval, 60000},
-	    %% Default max message size is 128 MB
-	    {max_message_size, 134217728},
+	    %% Default max message size is 16 MB
+	    {max_message_size, 16777216},
 	    %% Socket writer will run GC every 1 GB of outgoing data
 	    {writer_gc_threshold, 1000000000},
 	    %% interval at which connection/channel tracking executes post operations
 	    {tracking_execution_timeout, 15000},
 	    {stream_messages_soft_limit, 256},
-      {track_auth_attempt_source, false},
-			{credentials_obfuscation_fallback_secret, <<"nocookie">>},
-      {dead_letter_worker_consumer_prefetch, 32},
-      {dead_letter_worker_publisher_confirm_timeout, 180000},
-			%% EOL date for the current release series, if known/announced
-			{release_series_eol_date, none}
+      	{track_auth_attempt_source, false},
+		{credentials_obfuscation_fallback_secret, <<"nocookie">>},
+      	{dead_letter_worker_consumer_prefetch, 32},
+      	{dead_letter_worker_publisher_confirm_timeout, 180000},
+		%% EOL date for the current release series, if known/announced
+		{release_series_eol_date, none},
+		{vhost_process_reconciliation_run_interval, 30},
+		%% for testing
+		{vhost_process_reconciliation_enabled, true}
 	  ]
 endef
 
@@ -242,13 +244,6 @@ endif
 
 ifdef TRACE_SUPERVISOR2
 RMQ_ERLC_OPTS += -DTRACE_SUPERVISOR2=true
-endif
-
-ifndef USE_PROPER_QC
-# PropEr needs to be installed for property checking
-# http://proper.softlab.ntua.gr/
-USE_PROPER_QC := $(shell $(ERL) -eval 'io:format({module, proper} =:= code:ensure_loaded(proper)), halt().')
-RMQ_ERLC_OPTS += $(if $(filter true,$(USE_PROPER_QC)),-Duse_proper_qc)
 endif
 
 # --------------------------------------------------------------------

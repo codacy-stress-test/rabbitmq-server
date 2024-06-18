@@ -14,7 +14,7 @@ endif
 PROJECT_VERSION := $(RABBITMQ_VERSION)
 
 ifeq ($(PROJECT_VERSION),)
-PROJECT_VERSION := $(shell \
+PROJECT_VERSION = $(shell \
 if test -f git-revisions.txt; then \
 	head -n1 git-revisions.txt | \
 	awk '{print $$$(words $(PROJECT_DESCRIPTION) version);}'; \
@@ -123,7 +123,7 @@ dep_khepri = hex 0.13.0
 dep_khepri_mnesia_migration = hex 0.4.0
 dep_looking_glass = git https://github.com/rabbitmq/looking_glass.git main
 dep_prometheus = hex 4.11.0
-dep_ra = hex 2.10.1
+dep_ra = hex 2.11.0
 dep_ranch = hex 2.1.0
 dep_recon = hex 2.5.3
 dep_redbug = hex 2.0.7
