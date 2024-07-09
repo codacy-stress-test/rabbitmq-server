@@ -186,8 +186,6 @@ test_suite_beam_files(name = "test_suite_beam_files")
 # gazelle:erlang_app_dep sysmon_handler
 # gazelle:erlang_app_dep systemd
 
-# gazelle:erlang_app_dep_exclude looking_glass
-
 rabbitmq_app(
     name = "erlang_app",
     srcs = [":all_srcs"],
@@ -249,11 +247,10 @@ plt(
     ],
     for_target = ":erlang_app",
     ignore_warnings = True,
-    libs = ["//deps/rabbitmq_cli:elixir"],  # keep
+    libs = ["@rules_elixir//elixir"],  # keep
     plt = "//:base_plt",
     deps = [
         "//deps/rabbitmq_cli:erlang_app",  # keep
-        "@looking_glass//:erlang_app",  # keep
     ],
 )
 
@@ -400,6 +397,10 @@ rabbitmq_integration_suite(
         ":test_queue_utils_beam",
     ],
     shard_count = 6,
+)
+
+rabbitmq_integration_suite(
+    name = "amqpl_consumer_ack_SUITE",
 )
 
 rabbitmq_integration_suite(
@@ -571,13 +572,13 @@ rabbitmq_integration_suite(
 rabbitmq_integration_suite(
     name = "per_user_connection_channel_limit_SUITE",
     size = "medium",
-    shard_count = 7,
+    shard_count = 4,
 )
 
 rabbitmq_integration_suite(
     name = "per_user_connection_channel_tracking_SUITE",
     size = "medium",
-    shard_count = 8,
+    shard_count = 4,
 )
 
 rabbitmq_integration_suite(
@@ -593,7 +594,7 @@ rabbitmq_integration_suite(
 rabbitmq_integration_suite(
     name = "per_vhost_connection_limit_SUITE",
     size = "medium",
-    shard_count = 9,
+    shard_count = 5,
 )
 
 rabbitmq_integration_suite(
@@ -656,7 +657,7 @@ rabbitmq_integration_suite(
     additional_beam = [
         ":test_queue_utils_beam",
     ],
-    shard_count = 5,
+    shard_count = 3,
 )
 
 rabbitmq_integration_suite(
@@ -810,7 +811,7 @@ rabbitmq_integration_suite(
     additional_beam = [
         ":test_queue_utils_beam",
     ],
-    shard_count = 22,
+    shard_count = 19,
     deps = [
         "@proper//:erlang_app",
     ],
@@ -1230,7 +1231,7 @@ rabbitmq_integration_suite(
 rabbitmq_integration_suite(
     name = "amqp_credit_api_v2_SUITE",
     runtime_deps = [
-        "//deps/amqp10_client:erlang_app",
+        "//deps/rabbitmq_amqp_client:erlang_app",
     ],
 )
 

@@ -6,7 +6,7 @@ const { buildDriver, goToHome, captureScreensFor, teardown, idpLoginPage } = req
 const SSOHomePage = require('../../pageobjects/SSOHomePage')
 const OverviewPage = require('../../pageobjects/OverviewPage')
 
-describe('An user without administrator tag', function () {
+describe('An user without management tag', function () {
   let homePage
   let idpLogin
   let overview

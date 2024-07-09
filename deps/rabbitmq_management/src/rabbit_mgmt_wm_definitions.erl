@@ -63,7 +63,7 @@ all_definitions(ReqData, Context) ->
        {rabbitmq_version, rabbit_data_coercion:to_binary(Vsn)},
        {product_name, rabbit_data_coercion:to_binary(ProductName)},
        {product_version, rabbit_data_coercion:to_binary(ProductVersion)}] ++
-      filter(
+      retain_whitelisted(
         [{users,             rabbit_mgmt_wm_users:users(all)},
          {vhosts,            rabbit_mgmt_wm_vhosts:basic()},
          {permissions,       rabbit_mgmt_wm_permissions:permissions()},
@@ -112,7 +112,7 @@ vhost_definitions(ReqData, VHost, Context) ->
                   || P <- rabbit_runtime_parameters:list(VHost)],
     rabbit_mgmt_util:reply(
       [{rabbit_version, rabbit_data_coercion:to_binary(Vsn)}] ++
-          filter(
+          retain_whitelisted(
             [{parameters,  Parameters},
              {policies,    [strip_vhost(P) || P <- rabbit_mgmt_wm_policies:basic(ReqData)]},
              {queues,      Qs},
@@ -254,7 +254,7 @@ export_name(_Name)                -> true.
 
 rw_state() ->
     [{users,              [name, password_hash, hashing_algorithm, tags, limits]},
-     {vhosts,             [name]},
+     {vhosts,             [name, description, tags, default_queue_type, metadata]},
      {permissions,        [user, vhost, configure, write, read]},
      {topic_permissions,  [user, vhost, exchange, write, read]},
      {parameters,         [vhost, component, name, value]},
@@ -266,14 +266,14 @@ rw_state() ->
      {bindings,           [source, vhost, destination, destination_type, routing_key,
                            arguments]}].
 
-filter(Items) ->
-    [filter_items(N, V, proplists:get_value(N, rw_state())) || {N, V} <- Items].
+retain_whitelisted(Items) ->
+    [retain_whitelisted_items(N, V, proplists:get_value(N, rw_state())) || {N, V} <- Items].
 
-filter_items(Name, List, Allowed) ->
-    {Name, [filter_item(I, Allowed) || I <- List]}.
+retain_whitelisted_items(Name, List, Allowed) ->
+    {Name, [only_whitelisted_for_item(I, Allowed) || I <- List]}.
 
-filter_item(Item, Allowed) ->
-    [{K, Fact} || {K, Fact} <- Item, lists:member(K, Allowed)].
+only_whitelisted_for_item(Item, Allowed) ->
+    [{K, Fact} || {K, Fact} <- Item, lists:member(K, Allowed), Fact =/= undefined].
 
 strip_vhost(Item) ->
     lists:keydelete(vhost, 1, Item).

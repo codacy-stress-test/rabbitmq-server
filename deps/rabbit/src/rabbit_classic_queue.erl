@@ -37,7 +37,7 @@
          close/1,
          update/2,
          consume/3,
-         cancel/5,
+         cancel/3,
          handle_event/3,
          deliver/3,
          settle/5,
@@ -262,22 +262,27 @@ consume_backwards_compat({credited, credit_api_v1}, Args) ->
      [{<<"x-credit">>, table, [{<<"credit">>, long, 0},
                                {<<"drain">>,  bool, false}]} | Args]}.
 
-cancel(Q, ConsumerTag, OkMsg, ActingUser, State) ->
-    QPid = amqqueue:get_pid(Q),
-    case delegate:invoke(QPid, {gen_server2, call,
-                                [{basic_cancel, self(), ConsumerTag,
-                                  OkMsg, ActingUser}, infinity]}) of
-        ok ->
-            {ok, State};
+cancel(Q, Spec, State) ->
+    %% Cancel API v2 reuses feature flag credit_api_v2.
+    Request = case rabbit_feature_flags:is_enabled(credit_api_v2) of
+                  true ->
+                      {stop_consumer, Spec#{pid => self()}};
+                  false ->
+                      #{consumer_tag := ConsumerTag,
+                        user := ActingUser} = Spec,
+                      OkMsg = maps:get(ok_msg, Spec, undefined),
+                      {basic_cancel, self(), ConsumerTag, OkMsg, ActingUser}
+              end,
+    case delegate:invoke(amqqueue:get_pid(Q),
+                         {gen_server2, call, [Request, infinity]}) of
+        ok -> {ok, State};
         Err -> Err
     end.
 
 -spec settle(rabbit_amqqueue:name(), rabbit_queue_type:settle_op(),
              rabbit_types:ctag(), [non_neg_integer()], state()) ->
     {state(), rabbit_queue_type:actions()}.
-settle(_QName, Op, _CTag, MsgIds0, State = #?STATE{pid = Pid}) ->
-    %% Classic queues expect message IDs in sorted order.
-    MsgIds = lists:usort(MsgIds0),
+settle(_QName, Op, _CTag, MsgIds, State = #?STATE{pid = Pid}) ->
     Arg = case Op of
               complete ->
                   {ack, MsgIds, self()};
@@ -513,8 +518,7 @@ capabilities() ->
                           <<"x-overflow">>, <<"x-queue-mode">>, <<"x-queue-version">>,
                           <<"x-single-active-consumer">>, <<"x-queue-type">>,
                           <<"x-queue-master-locator">>],
-      consumer_arguments => [<<"x-cancel-on-ha-failover">>,
-                             <<"x-priority">>, <<"x-credit">>],
+      consumer_arguments => [<<"x-priority">>, <<"x-credit">>],
       server_named => true}.
 
 notify_decorators(Q) when ?is_amqqueue(Q) ->

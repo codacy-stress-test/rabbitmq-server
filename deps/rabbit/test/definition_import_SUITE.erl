@@ -55,7 +55,7 @@ groups() ->
                                import_case20,
                                import_case21
                               ]},
-        
+
         {boot_time_import_using_classic_source, [], [
             import_on_a_booting_node_using_classic_local_source
         ]},
@@ -210,8 +210,9 @@ import_case11(Config) -> import_file_case(Config, "case11").
 import_case12(Config) -> import_invalid_file_case(Config, "failing_case12").
 
 import_case13(Config) ->
-    import_file_case(Config, "case13"),
     VHost = <<"/">>,
+    delete_vhost(Config, VHost),
+    import_file_case(Config, "case13"),
     QueueName = <<"definitions.import.case13.qq.1">>,
     QueueIsImported =
     fun () ->
@@ -230,8 +231,9 @@ import_case13(Config) ->
                  amqqueue:get_arguments(Q)).
 
 import_case13a(Config) ->
-    import_file_case(Config, "case13"),
     VHost = <<"/">>,
+    delete_vhost(Config, VHost),
+    import_file_case(Config, "case13"),
     QueueName = <<"definitions.import.case13.qq.1">>,
     QueueIsImported =
     fun () ->
@@ -253,20 +255,26 @@ import_case14(Config) -> import_file_case(Config, "case14").
 import_case15(Config) -> import_file_case(Config, "case15").
 %% contains a virtual host with tags
 import_case16(Config) ->
-    import_file_case(Config, "case16"),
     VHost = <<"tagged">>,
+    delete_vhost(Config, VHost),
+    import_file_case(Config, "case16"),
     VHostIsImported =
     fun () ->
             case vhost_lookup(Config, VHost) of
-                {error, {no_such_vhosts, _}} -> false;
+                {error, {no_such_vhost, _}} -> false;
+                {error, _} -> false;
                 _       -> true
             end
     end,
     rabbit_ct_helpers:await_condition(VHostIsImported, 20000),
     VHostRec = vhost_lookup(Config, VHost),
-    ?assertEqual(<<"A case16 description">>, vhost:get_description(VHostRec)),
-    ?assertEqual(<<"quorum">>, vhost:get_default_queue_type(VHostRec)),
-    ?assertEqual([multi_dc_replication,ab,cde], vhost:get_tags(VHostRec)),
+    case VHostRec of
+        {error, _} -> ct:fail("Failed to import virtual host named 'tagged' in case 16");
+        Val when is_tuple(Val) ->
+            ?assertEqual(<<"A case16 description">>, vhost:get_description(VHostRec)),
+            ?assertEqual(<<"quorum">>, vhost:get_default_queue_type(VHostRec)),
+            ?assertEqual([multi_dc_replication,ab,cde], vhost:get_tags(VHostRec))
+    end,
 
     ok.
 
@@ -488,3 +496,6 @@ vhost_lookup(Config, VHost) ->
 
 user_lookup(Config, User) ->
     rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_auth_backend_internal, lookup_user, [User]).
+
+delete_vhost(Config, VHost) ->
+    rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_vhost, delete, [VHost, <<"CT tests">>]).

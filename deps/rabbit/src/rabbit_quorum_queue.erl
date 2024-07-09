@@ -24,7 +24,7 @@
          delete/4,
          delete_immediately/1]).
 -export([state_info/1, info/2, stat/1, infos/1, infos/2]).
--export([settle/5, dequeue/5, consume/3, cancel/5]).
+-export([settle/5, dequeue/5, consume/3, cancel/3]).
 -export([credit_v1/5, credit/6]).
 -export([purge/1]).
 -export([stateless_deliver/2, deliver/3]).
@@ -51,9 +51,6 @@
          grow/4,
          grow/5]).
 -export([transfer_leadership/2, get_replicas/1, queue_length/1]).
--export([file_handle_leader_reservation/1,
-         file_handle_other_reservation/0]).
--export([file_handle_release_reservation/0]).
 -export([list_with_minimum_quorum/0,
          list_with_local_promotable/0,
          list_with_local_promotable_for_cli/0,
@@ -404,7 +401,8 @@ all_replica_states() ->
                              {K, promotable};
                          ({K, follower, non_voter}) ->
                              {K, non_voter};
-                         ({K, S, voter}) ->
+                         ({K, S, _}) ->
+                             %% voter or unknown
                              {K, S};
                          (T) ->
                              T
@@ -914,8 +912,8 @@ consume(Q, Spec, QState0) when ?amqqueue_is_quorum(Q) ->
             {ok, QState}
     end.
 
-cancel(_Q, ConsumerTag, OkMsg, _ActingUser, State) ->
-    maybe_send_reply(self(), OkMsg),
+cancel(_Q, #{consumer_tag := ConsumerTag} = Spec, State) ->
+    maybe_send_reply(self(), maps:get(ok_msg, Spec, undefined)),
     rabbit_fifo_client:cancel_checkout(quorum_ctag(ConsumerTag), State).
 
 emit_consumer_created(ChPid, CTag, Exclusive, AckRequired, QName, PrefetchCount, Args, Ref, ActingUser) ->
@@ -1413,24 +1411,6 @@ matches_strategy(even, Members) ->
 
 is_match(Subj, E) ->
    nomatch /= re:run(Subj, E).
-
-file_handle_leader_reservation(QName) ->
-    try
-        {ok, Q} = rabbit_amqqueue:lookup(QName),
-        ClusterSize = length(get_nodes(Q)),
-        file_handle_cache:set_reservation(2 + ClusterSize)
-    catch Class:Err ->
-              rabbit_log:warning("~s:~s/~b failed with ~w ~w",
-                                 [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY,
-                                  Class, Err])
-    end.
-
-
-file_handle_other_reservation() ->
-    file_handle_cache:set_reservation(2).
-
-file_handle_release_reservation() ->
-    file_handle_cache:release_reservation().
 
 -spec reclaim_memory(rabbit_types:vhost(), Name :: rabbit_misc:resource_name()) -> ok | {error, term()}.
 reclaim_memory(Vhost, QueueName) ->

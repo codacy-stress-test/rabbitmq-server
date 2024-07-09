@@ -66,7 +66,6 @@
          published = false :: boolean(),
          ssl_login_name :: none | binary(),
          retainer_pid :: pid(),
-         delivery_flow, %% Deprecated since removal of CMQ in 4.0
          trace_state :: rabbit_trace:state(),
          prefetch :: non_neg_integer(),
          vhost :: rabbit_types:vhost(),
@@ -1992,25 +1991,14 @@ handle_queue_actions(Actions, #state{} = State0) ->
 
 handle_queue_down(QName, State0 = #state{cfg = #cfg{client_id = ClientId}}) ->
     %% Classic queue is down.
-    case rabbit_amqqueue:lookup(QName) of
-        {ok, Q} ->
-            case rabbit_mqtt_util:qos_from_queue_name(QName, ClientId) of
-                no_consuming_queue ->
-                    State0;
-                QoS ->
-                    %% Consuming classic queue is down.
-                    %% Let's try to re-consume: HA failover for classic mirrored queues.
-                    case consume(Q, QoS, State0) of
-                        {ok, State} ->
-                            State;
-                        {error, _Reason} ->
-                            ?LOG_INFO("Terminating MQTT connection because consuming ~s is down.",
-                                      [rabbit_misc:rs(QName)]),
-                            throw(consuming_queue_down)
-                    end
-            end;
-        {error, not_found} ->
-            State0
+    case rabbit_mqtt_util:qos_from_queue_name(QName, ClientId) of
+        no_consuming_queue ->
+            State0;
+        _QoS ->
+            %% Consuming classic queue is down.
+            ?LOG_INFO("Terminating MQTT connection because consuming ~s is down.",
+                      [rabbit_misc:rs(QName)]),
+            throw(consuming_queue_down)
     end.
 
 deliver_to_client(Msgs, Ack, State) ->

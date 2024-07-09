@@ -1,7 +1,6 @@
 load(
     "@bazel_skylib//rules:common_settings.bzl",
     "bool_flag",
-    "string_flag",
 )
 load("@rules_pkg//pkg:mappings.bzl", "pkg_files")
 load("@bazel_gazelle//:def.bzl", "gazelle")
@@ -11,7 +10,7 @@ load("@rules_erlang//:dialyze.bzl", "DEFAULT_PLT_APPS", "plt")
 load("@rules_erlang//:shell.bzl", "shell")
 load("@rules_erlang//:erl_eval.bzl", "erl_eval")
 load("@rules_erlang//gazelle:moduleindex.bzl", "moduleindex")
-load("//bazel/elixir:iex_eval.bzl", "iex_eval")
+load("@rules_elixir//:iex_eval.bzl", "iex_eval")
 load(":rabbitmq_home.bzl", "rabbitmq_home")
 load(":rabbitmq_run.bzl", "rabbitmq_run", "rabbitmq_run_command")
 load(":rabbitmqctl.bzl", "rabbitmqctl")
@@ -124,12 +123,6 @@ config_setting(
     },
 )
 
-string_flag(
-    name = "elixir_home",
-    build_setting_default = "",
-    visibility = ["//visibility:public"],
-)
-
 plt(
     name = "base_plt",
     apps = DEFAULT_PLT_APPS + [
@@ -141,10 +134,7 @@ plt(
 
 PLUGINS = all_plugins(
     rabbitmq_workspace = "",
-) + select({
-    "@rules_erlang//:debug_build": ["@looking_glass//:erlang_app"],
-    "//conditions:default": [],
-})
+)
 
 rabbitmq_home(
     name = "broker-home",
@@ -293,7 +283,6 @@ moduleindex(
         "@ct_helper//:erlang_app",
         "@emqtt//:erlang_app",
         "@inet_tcp_proxy_dist//:erlang_app",
-        "@looking_glass//:erlang_app",
         "@meck//:erlang_app",
         "@proper//:erlang_app",
         "//deps/rabbitmq_ct_client_helpers:erlang_app",

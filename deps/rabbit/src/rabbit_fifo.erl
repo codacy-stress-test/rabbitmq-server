@@ -808,7 +808,7 @@ purge_node(Meta, Node, State, Effects) ->
                         {S, E0 ++ E}
                 end, {State, Effects}, all_pids_for(Node, State)).
 
-%% any downs that re not noconnection
+%% any downs that are not noconnection
 handle_down(Meta, Pid, #?MODULE{consumers = Cons0,
                                 enqueuers = Enqs0} = State0) ->
     % Remove any enqueuer for the down pid
@@ -894,10 +894,8 @@ state_enter0(leader, #?MODULE{consumers = Cons,
     Mons = [{monitor, process, P} || P <- Pids],
     Nots = [{send_msg, P, leader_change, ra_event} || P <- Pids],
     NodeMons = lists:usort([{monitor, node, node(P)} || P <- Pids]),
-    FHReservation = [{mod_call, rabbit_quorum_queue,
-                      file_handle_leader_reservation, [Resource]}],
     NotifyDecs = notify_decorators_startup(Resource),
-    Effects = TimerEffs ++ Mons ++ Nots ++ NodeMons ++ FHReservation ++ [NotifyDecs],
+    Effects = TimerEffs ++ Mons ++ Nots ++ NodeMons ++ [NotifyDecs],
     case BLH of
         undefined ->
             Effects;
@@ -914,12 +912,7 @@ state_enter0(eol, #?MODULE{enqueuers = Enqs,
     AllConsumers = maps:merge(Custs, WaitingConsumers1),
     [{send_msg, P, eol, ra_event}
      || P <- maps:keys(maps:merge(Enqs, AllConsumers))] ++
-    [{aux, eol},
-     {mod_call, rabbit_quorum_queue, file_handle_release_reservation, []} | Effects];
-state_enter0(State, #?MODULE{cfg = #cfg{resource = _Resource}}, Effects)
-  when State =/= leader ->
-    FHReservation = {mod_call, rabbit_quorum_queue, file_handle_other_reservation, []},
-    [FHReservation | Effects];
+    [{aux, eol} | Effects];
 state_enter0(_, _, Effects) ->
     %% catch all as not handling all states
     Effects.

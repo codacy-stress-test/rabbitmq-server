@@ -7,7 +7,6 @@
 
 -module(rabbit_amqqueue).
 
--export([warn_file_limit/0]).
 -export([recover/1, stop/1, start/1, declare/6, declare/7,
          delete_immediately/1, delete_exclusive/2, delete/4, purge/1,
          forget_all_durable/1]).
@@ -31,7 +30,7 @@
 -export([list_by_type/1, sample_local_queues/0, sample_n_by_name/2, sample_n/2]).
 -export([force_event_refresh/1, notify_policy_changed/1]).
 -export([consumers/1, consumers_all/1,  emit_consumers_all/4, consumer_info_keys/0]).
--export([basic_get/5, basic_consume/12, basic_cancel/5, notify_decorators/1]).
+-export([basic_get/5, basic_consume/12, notify_decorators/1]).
 -export([notify_sent/2, notify_sent_queue_down/1, resume/2]).
 -export([notify_down_all/2, notify_down_all/3, activate_limit_all/2]).
 -export([on_node_up/1, on_node_down/1]).
@@ -63,7 +62,7 @@
 -export([is_server_named_allowed/1]).
 
 -export([check_max_age/1]).
--export([get_queue_type/1, get_resource_vhost_name/1, get_resource_name/1]).
+-export([get_queue_type/1, get_queue_type/2, get_resource_vhost_name/1, get_resource_name/1]).
 
 -export([deactivate_limit_all/2]).
 
@@ -74,7 +73,6 @@
 
 %% internal
 -export([internal_declare/2, internal_delete/2, run_backing_queue/3,
-         set_ram_duration_target/2, set_maximum_since_use/2,
          emit_consumers_local/3, internal_delete/3]).
 
 -include_lib("rabbit_common/include/rabbit.hrl").
@@ -118,21 +116,6 @@
         [queue_name, channel_pid, consumer_tag, ack_required, prefetch_count,
          active, activity_status, arguments]).
 -define(KILL_QUEUE_DELAY_INTERVAL, 100).
-
-warn_file_limit() ->
-    DurableQueues = find_recoverable_queues(),
-    L = length(DurableQueues),
-
-    %% if there are not enough file handles, the server might hang
-    %% when trying to recover queues, warn the user:
-    case file_handle_cache:get_limit() < L of
-        true ->
-            rabbit_log:warning(
-              "Recovering ~tp queues, available file handles: ~tp. Please increase max open file handles limit to at least ~tp!",
-              [L, file_handle_cache:get_limit(), L]);
-        false ->
-            ok
-    end.
 
 -spec recover(rabbit_types:vhost()) ->
     {Recovered :: [amqqueue:amqqueue()],
@@ -183,11 +166,6 @@ find_local_durable_queues(VHostName) ->
                                                    rabbit_queue_type:is_recoverable(Q)
                                        end).
 
-find_recoverable_queues() ->
-    rabbit_db_queue:filter_all_durable(fun(Q) ->
-                                               rabbit_queue_type:is_recoverable(Q)
-                                       end).
-
 -spec declare(name(),
               boolean(),
               boolean(),
@@ -203,9 +181,9 @@ declare(QueueName, Durable, AutoDelete, Args, Owner, ActingUser) ->
     declare(QueueName, Durable, AutoDelete, Args, Owner, ActingUser, node()).
 
 
-%% The Node argument suggests where the queue (leader if mirrored)
-%% should be. Note that in some cases (e.g. with "nodes" policy in
-%% effect) this might not be possible to satisfy.
+%% The Node argument suggests where the queue leader replica
+%% should be placed. Note that this function does not guarantee that
+%% this suggestion will be satisfied.
 
 -spec declare(name(),
               boolean(),
@@ -220,8 +198,10 @@ declare(QueueName, Durable, AutoDelete, Args, Owner, ActingUser) ->
     {protocol_error, Type :: atom(), Reason :: string(), Args :: term()}.
 declare(QueueName = #resource{virtual_host = VHost}, Durable, AutoDelete, Args,
         Owner, ActingUser, Node) ->
-    ok = check_declare_arguments(QueueName, Args),
-    Type = get_queue_type(Args),
+    %% note: this is a module name, not a shortcut such as <<"quorum">>
+    DQT = rabbit_vhost:default_queue_type(VHost, rabbit_queue_type:fallback()),
+    ok = check_declare_arguments(QueueName, Args, DQT),
+    Type = get_queue_type(Args, DQT),
     case rabbit_queue_type:is_enabled(Type) of
         true ->
             Q = amqqueue:new(QueueName,
@@ -248,10 +228,25 @@ declare(QueueName = #resource{virtual_host = VHost}, Durable, AutoDelete, Args,
              [rabbit_misc:rs(QueueName), Type, Node]}
     end.
 
+-spec get_queue_type(Args :: rabbit_framing:amqp_table()) -> rabbit_queue_type:queue_type().
+%% This version is not virtual host metadata-aware but will use
+%% the node-wide default type as well as 'rabbit_queue_type:fallback/0'.
+get_queue_type([]) ->
+    rabbit_queue_type:default();
 get_queue_type(Args) ->
+    get_queue_type(Args, rabbit_queue_type:default()).
+
+%% This version should be used together with 'rabbit_vhost:default_queue_type/{1,2}'
+get_queue_type([], DefaultQueueType) ->
+    rabbit_queue_type:discover(DefaultQueueType);
+get_queue_type(Args, DefaultQueueType) ->
     case rabbit_misc:table_lookup(Args, <<"x-queue-type">>) of
         undefined ->
-            rabbit_queue_type:default();
+            rabbit_queue_type:discover(DefaultQueueType);
+        {longstr, undefined} ->
+            rabbit_queue_type:discover(DefaultQueueType);
+        {longstr, <<"undefined">>} ->
+            rabbit_queue_type:discover(DefaultQueueType);
         {_, V} ->
             rabbit_queue_type:discover(V)
     end.
@@ -733,7 +728,7 @@ augment_declare_args(VHost, Durable, Exclusive, AutoDelete, Args0) ->
             case IsPermitted andalso IsCompatible of
                 true ->
                     %% patch up declare arguments with x-queue-type if there
-                    %% is a vhost default set the queue is druable and not exclusive
+                    %% is a vhost default set the queue is durable and not exclusive
                     %% and there is no queue type argument
                     %% present
                     rabbit_misc:set_table_value(Args0,
@@ -741,7 +736,12 @@ augment_declare_args(VHost, Durable, Exclusive, AutoDelete, Args0) ->
                                                 longstr,
                                                 DefaultQueueType);
                 false ->
-                    Args0
+                    %% if the properties are incompatible with the declared
+                    %% DQT, use the fall back type
+                    rabbit_misc:set_table_value(Args0,
+                                                <<"x-queue-type">>,
+                                                longstr,
+                                                rabbit_queue_type:short_alias_of(rabbit_queue_type:fallback()))
             end;
         _ ->
             Args0
@@ -783,7 +783,33 @@ assert_args_equivalence(Q, NewArgs) ->
     QueueTypeArgs = rabbit_queue_type:arguments(queue_arguments, Type),
     rabbit_misc:assert_args_equivalence(ExistingArgs, NewArgs, QueueName, QueueTypeArgs).
 
-check_declare_arguments(QueueName, Args) ->
+-spec maybe_inject_default_queue_type_shortcut_into_args(
+    rabbit_framing:amqp_table(), rabbit_queue_type:queue_type()) -> rabbit_framing:amqp_table().
+maybe_inject_default_queue_type_shortcut_into_args(Args0, DefaultQueueType) ->
+    case rabbit_misc:table_lookup(Args0, <<"x-queue-type">>) of
+        undefined ->
+            inject_default_queue_type_shortcut_into_args(Args0, DefaultQueueType);
+        {longstr, undefined} ->
+            %% Important: use a shortcut such as 'quorum' or 'stream' that for the given queue type module
+            inject_default_queue_type_shortcut_into_args(Args0, DefaultQueueType);
+        {longstr, <<"undefined">>} ->
+            %% Important: use a shortcut such as 'quorum' or 'stream' that for the given queue type module
+            inject_default_queue_type_shortcut_into_args(Args0, DefaultQueueType);
+        _ValueIsAlreadySet ->
+            Args0
+    end.
+
+-spec inject_default_queue_type_shortcut_into_args(
+    rabbit_framing:amqp_table(), rabbit_queue_type:queue_type()) -> rabbit_framing:amqp_table().
+inject_default_queue_type_shortcut_into_args(Args0, QueueType) ->
+    Shortcut = rabbit_queue_type:short_alias_of(QueueType),
+    NewVal = rabbit_data_coercion:to_binary(Shortcut),
+    rabbit_misc:set_table_value(Args0, <<"x-queue-type">>, longstr, NewVal).
+
+check_declare_arguments(QueueName, Args0, DefaultQueueType) ->
+    %% If the x-queue-type was not provided by the client, inject the
+    %% (virtual host, global or fallback) default before performing validation. MK.
+    Args = maybe_inject_default_queue_type_shortcut_into_args(Args0, DefaultQueueType),
     check_arguments_type_and_value(QueueName, Args, [{<<"x-queue-type">>, fun check_queue_type/2}]),
     Type = get_queue_type(Args),
     QueueTypeArgs = rabbit_queue_type:arguments(queue_arguments, Type),
@@ -851,7 +877,6 @@ declare_args() ->
      {<<"x-queue-leader-locator">>, fun check_queue_leader_locator_arg/2}].
 
 consume_args() -> [{<<"x-priority">>,              fun check_int_arg/2},
-                   {<<"x-cancel-on-ha-failover">>, fun check_bool_arg/2},
                    {<<"x-stream-offset">>, fun check_stream_offset_arg/2}].
 
 check_int_arg({Type, _}, _) ->
@@ -1100,6 +1125,8 @@ check_queue_type(Val, _Args) when is_binary(Val) ->
         true  -> ok;
         false -> {error, rabbit_misc:format("unsupported queue type '~ts'", [Val])}
     end;
+check_queue_type(Val, Args) when is_atom(Val) ->
+    check_queue_type(rabbit_data_coercion:to_binary(Val), Args);
 check_queue_type(_Val, _Args) ->
     {error, invalid_queue_type}.
 
@@ -1714,14 +1741,6 @@ basic_consume(Q, NoAck, ChPid, LimiterPid,
              acting_user =>  ActingUser},
     rabbit_queue_type:consume(Q, Spec, QStates).
 
--spec basic_cancel(amqqueue:amqqueue(), rabbit_types:ctag(), any(),
-                   rabbit_types:username(),
-                   rabbit_queue_type:state()) ->
-    {ok, rabbit_queue_type:state()} | {error, term()}.
-basic_cancel(Q, ConsumerTag, OkMsg, ActingUser, QStates) ->
-    rabbit_queue_type:cancel(Q, ConsumerTag,
-                             OkMsg, ActingUser, QStates).
-
 -spec notify_decorators(amqqueue:amqqueue()) -> 'ok'.
 
 notify_decorators(Q) ->
@@ -1789,16 +1808,6 @@ forget_node_for_queue(Q) ->
 
 run_backing_queue(QPid, Mod, Fun) ->
     gen_server2:cast(QPid, {run_backing_queue, Mod, Fun}).
-
--spec set_ram_duration_target(pid(), number() | 'infinity') -> 'ok'.
-
-set_ram_duration_target(QPid, Duration) ->
-    gen_server2:cast(QPid, {set_ram_duration_target, Duration}).
-
--spec set_maximum_since_use(pid(), non_neg_integer()) -> 'ok'.
-
-set_maximum_since_use(QPid, Age) ->
-    gen_server2:cast(QPid, {set_maximum_since_use, Age}).
 
 -spec is_replicated(amqqueue:amqqueue()) -> boolean().
 

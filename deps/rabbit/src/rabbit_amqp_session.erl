@@ -19,10 +19,15 @@
 -rabbit_deprecated_feature(
    {amqp_address_v1,
     #{deprecation_phase => permitted_by_default,
+      doc_url => "https://www.rabbitmq.com/docs/next/amqp#address",
       messages =>
       #{when_permitted =>
         "RabbitMQ AMQP address version 1 is deprecated. "
-        "Clients should use RabbitMQ AMQP address version 2."}}
+        "Clients should use RabbitMQ AMQP address version 2.",
+        when_denied =>
+        "RabbitMQ AMQP address version 1 is unsupported. "
+        "Clients must use RabbitMQ AMQP address version 2."
+       }}
    }).
 
 -define(PROTOCOL, amqp10).
@@ -285,9 +290,9 @@
           %% However, they are buffered here due to session flow control
           %% (when remote_incoming_window <= 0) before being sent to the AMQP client.
           %%
-          %% FLOW frames are stored here as well because for a specific outgoing link the order
-          %% in which we send TRANSFER and FLOW frames is important. An outgoing FLOW frame with link flow
-          %% control information must not overtake a TRANSFER frame for the same link just because
+          %% FLOW frames (and credit reply actions) are stored here as well because for a specific outgoing link
+          %% the order in which we send TRANSFER and FLOW frames is important. An outgoing FLOW frame with link
+          %% flow control information must not overtake a TRANSFER frame for the same link just because
           %% we are throttled by session flow control. (However, we can still send outgoing FLOW frames
           %% that contain only session flow control information, i.e. where the FLOW's 'handle' field is not set.)
           %% Example:
@@ -296,8 +301,8 @@
           %% client (once the remote_incoming_window got opened) followed by the FLOW with drain=true and credit=0
           %% and advanced delivery count. Otherwise, we would violate the AMQP protocol spec.
           outgoing_pending = queue:new() :: queue:queue(#pending_delivery{} |
-                                                        #pending_management_delivery{} |
                                                         rabbit_queue_type:credit_reply_action() |
+                                                        #pending_management_delivery{} |
                                                         #'v1_0.flow'{}),
 
           %% The link or session endpoint assigns each message a unique delivery-id
@@ -757,7 +762,8 @@ destroy_links(#resource{kind = queue,
               GrantCredits0,
               #state{incoming_links = IncomingLinks0,
                      outgoing_links = OutgoingLinks0,
-                     outgoing_unsettled_map = Unsettled0} = State0) ->
+                     outgoing_unsettled_map = Unsettled0,
+                     outgoing_pending = Pending0} = State0) ->
     {Frames1,
      GrantCredits,
      IncomingLinks} = maps:fold(fun(Handle, Link, Acc) ->
@@ -765,15 +771,20 @@ destroy_links(#resource{kind = queue,
                                 end, {Frames0, GrantCredits0, IncomingLinks0}, IncomingLinks0),
     {Frames,
      Unsettled,
+     Pending,
      OutgoingLinks} = maps:fold(fun(Handle, Link, Acc) ->
                                         destroy_outgoing_link(Handle, Link, QNameBin, Acc)
-                                end, {Frames1, Unsettled0, OutgoingLinks0}, OutgoingLinks0),
+                                end, {Frames1, Unsettled0, Pending0, OutgoingLinks0}, OutgoingLinks0),
     State = State0#state{incoming_links = IncomingLinks,
                          outgoing_links = OutgoingLinks,
-                         outgoing_unsettled_map = Unsettled},
+                         outgoing_unsettled_map = Unsettled,
+                         outgoing_pending = Pending},
     {Frames, GrantCredits, State}.
 
-destroy_incoming_link(Handle, Link = #incoming_link{queue_name_bin = QNameBin}, QNameBin, {Frames, GrantCreds, Links}) ->
+destroy_incoming_link(Handle,
+                      Link = #incoming_link{queue_name_bin = QNameBin},
+                      QNameBin,
+                      {Frames, GrantCreds, Links}) ->
     {[detach(Handle, Link, ?V_1_0_AMQP_ERROR_RESOURCE_DELETED) | Frames],
      %% Don't grant credits for a link that we destroy.
      maps:remove(Handle, GrantCreds),
@@ -781,10 +792,14 @@ destroy_incoming_link(Handle, Link = #incoming_link{queue_name_bin = QNameBin}, 
 destroy_incoming_link(_, _, _, Acc) ->
     Acc.
 
-destroy_outgoing_link(Handle, Link = #outgoing_link{queue_name = #resource{name = QNameBin}}, QNameBin, {Frames, Unsettled0, Links}) ->
-    {Unsettled, _RemovedMsgIds} = remove_link_from_outgoing_unsettled_map(Handle, Unsettled0),
+destroy_outgoing_link(Handle,
+                      Link = #outgoing_link{queue_name = #resource{name = QNameBin}},
+                      QNameBin,
+                      {Frames, Unsettled0, Pending0, Links}) ->
+    {Unsettled, Pending} = remove_outgoing_link(Handle, Unsettled0, Pending0),
     {[detach(Handle, Link, ?V_1_0_AMQP_ERROR_RESOURCE_DELETED) | Frames],
      Unsettled,
+     Pending,
      maps:remove(Handle, Links)};
 destroy_outgoing_link(_, _, _, Acc) ->
     Acc.
@@ -1203,67 +1218,43 @@ handle_control(#'v1_0.flow'{handle = Handle} = Flow,
     {noreply, S};
 
 handle_control(Detach = #'v1_0.detach'{handle = ?UINT(HandleInt)},
-               State0 = #state{queue_states = QStates0,
-                               incoming_links = IncomingLinks,
+               State0 = #state{incoming_links = IncomingLinks,
                                outgoing_links = OutgoingLinks0,
                                outgoing_unsettled_map = Unsettled0,
+                               outgoing_pending = Pending0,
+                               queue_states = QStates0,
                                cfg = #cfg{user = #user{username = Username}}}) ->
-    Ctag = handle_to_ctag(HandleInt),
-    %% TODO delete queue if closed flag is set to true? see 2.6.6
-    %% TODO keep the state around depending on the lifetime
-    {QStates, Unsettled, OutgoingLinks}
-    = case maps:take(HandleInt, OutgoingLinks0) of
-          {#outgoing_link{queue_name = QName}, OutgoingLinks1} ->
-              case rabbit_amqqueue:lookup(QName) of
-                  {ok, Q} ->
-                      %%TODO Add a new rabbit_queue_type:remove_consumer API that - from the point of view of
-                      %% the queue process - behaves as if our session process terminated: All messages checked out
-                      %% to this consumer should be re-queued automatically instead of us requeueing them here after cancelling
-                      %% consumption.
-                      %% For AMQP legacy (and STOMP / MQTT) consumer cancellation not requeueing messages is a good approach as
-                      %% clients may want to ack any in-flight messages.
-                      %% For AMQP however, the consuming client can stop cancellations via link-credit=0 and drain=true being
-                      %% sure that no messages are in flight before detaching the link. Hence, AMQP doesn't need the
-                      %% rabbit_queue_type:cancel API semantics.
-                      %% A rabbit_queue_type:remove_consumer API has also the advantage to simplify reasoning about clients
-                      %% first detaching and then re-attaching to the same session with the same link handle (the handle
-                      %% becomes available for re-use once a link is closed): This will result in the same consumer tag,
-                      %% and we ideally disallow "updating" an AMQP consumer.
-                      %% If such an API is not added, we also must return messages in the outgoing_pending queue
-                      %% which haven't made it to the outgoing_unsettled map yet.
-                      case rabbit_queue_type:cancel(Q, Ctag, undefined, Username, QStates0) of
-                          {ok, QStates1} ->
-                              {Unsettled1, MsgIds} = remove_link_from_outgoing_unsettled_map(Ctag, Unsettled0),
-                              case MsgIds of
-                                  [] ->
-                                      {QStates1, Unsettled0, OutgoingLinks1};
-                                  _ ->
-                                      case rabbit_queue_type:settle(QName, requeue, Ctag, MsgIds, QStates1) of
-                                          {ok, QStates2, _Actions = []} ->
-                                              {QStates2, Unsettled1, OutgoingLinks1};
-                                          {protocol_error, _ErrorType, Reason, ReasonArgs} ->
-                                              protocol_error(?V_1_0_AMQP_ERROR_INTERNAL_ERROR,
-                                                             Reason, ReasonArgs)
-                                      end
-                              end;
-                          {error, Reason} ->
-                              protocol_error(
-                                ?V_1_0_AMQP_ERROR_INTERNAL_ERROR,
-                                "Failed to cancel consuming from ~s: ~tp",
-                                [rabbit_misc:rs(amqqueue:get_name(Q)), Reason])
-                      end;
-                  {error, not_found} ->
-                      {Unsettled1, _RemovedMsgIds} = remove_link_from_outgoing_unsettled_map(Ctag, Unsettled0),
-                      {QStates0, Unsettled1, OutgoingLinks1}
-              end;
-          error ->
-              {Unsettled1, _RemovedMsgIds} = remove_link_from_outgoing_unsettled_map(Ctag, Unsettled0),
-              {QStates0, Unsettled1, OutgoingLinks0}
-      end,
-    State1 = State0#state{queue_states = QStates,
-                          incoming_links = maps:remove(HandleInt, IncomingLinks),
+    {OutgoingLinks, Unsettled, Pending, QStates} =
+    case maps:take(HandleInt, OutgoingLinks0) of
+        {#outgoing_link{queue_name = QName}, OutgoingLinks1} ->
+            Ctag = handle_to_ctag(HandleInt),
+            {Unsettled1, Pending1} = remove_outgoing_link(Ctag, Unsettled0, Pending0),
+            case rabbit_amqqueue:lookup(QName) of
+                {ok, Q} ->
+                    Spec = #{consumer_tag => Ctag,
+                             reason => remove,
+                             user => Username},
+                    case rabbit_queue_type:cancel(Q, Spec, QStates0) of
+                        {ok, QStates1} ->
+                            {OutgoingLinks1, Unsettled1, Pending1, QStates1};
+                        {error, Reason} ->
+                            protocol_error(
+                              ?V_1_0_AMQP_ERROR_INTERNAL_ERROR,
+                              "Failed to remove consumer from ~s: ~tp",
+                              [rabbit_misc:rs(amqqueue:get_name(Q)), Reason])
+                    end;
+                {error, not_found} ->
+                    {OutgoingLinks1, Unsettled1, Pending1, QStates0}
+            end;
+        error ->
+            {OutgoingLinks0, Unsettled0, Pending0, QStates0}
+    end,
+
+    State1 = State0#state{incoming_links = maps:remove(HandleInt, IncomingLinks),
                           outgoing_links = OutgoingLinks,
-                          outgoing_unsettled_map = Unsettled},
+                          outgoing_unsettled_map = Unsettled,
+                          outgoing_pending = Pending,
+                          queue_states = QStates},
     State = maybe_detach_mgmt_link(HandleInt, State1),
     maybe_detach_reply(Detach, State, State0),
     publisher_or_consumer_deleted(State, State0),
@@ -1307,9 +1298,13 @@ handle_control(#'v1_0.disposition'{role = ?AMQP_ROLE_RECEIVER,
             case DispositionRangeSize =< UnsettledMapSize of
                 true ->
                     %% It is cheaper to iterate over the range of settled delivery IDs.
-                    serial_number:foldl(fun settle_delivery_id/2, {#{}, UnsettledMap0}, First, Last);
+                    serial_number:foldl(fun settle_delivery_id/2,
+                                        {#{}, UnsettledMap0},
+                                        First, Last);
                 false ->
                     %% It is cheaper to iterate over the outgoing unsettled map.
+                    Iter = maps:iterator(UnsettledMap0,
+                                         fun(D1, D2) -> compare(D1, D2) =/= greater end),
                     {Settled0, UnsettledList} =
                     maps:fold(
                       fun (DeliveryId,
@@ -1329,14 +1324,15 @@ handle_control(#'v1_0.disposition'{role = ?AMQP_ROLE_RECEIVER,
                                       {SettledAcc, [{DeliveryId, Unsettled} | UnsettledAcc]}
                               end
                       end,
-                      {#{}, []}, UnsettledMap0),
+                      {#{}, []}, Iter),
                     {Settled0, maps:from_list(UnsettledList)}
             end,
 
             SettleOp = settle_op_from_outcome(Outcome),
             {QStates, Actions} =
             maps:fold(
-              fun({QName, Ctag}, MsgIds, {QS0, ActionsAcc}) ->
+              fun({QName, Ctag}, MsgIdsRev, {QS0, ActionsAcc}) ->
+                      MsgIds = lists:reverse(MsgIdsRev),
                       case rabbit_queue_type:settle(QName, SettleOp, Ctag, MsgIds, QS0) of
                           {ok, QS, Actions0} ->
                               messages_acknowledged(SettleOp, QName, QS, MsgIds),
@@ -2431,12 +2427,24 @@ ensure_source(#'v1_0.source'{address = Address,
                              durable = Durable},
               Vhost, User, PermCache, TopicPermCache) ->
     case Address of
+        {utf8, <<"/queues/", QNameBinQuoted/binary>>} ->
+            %% The only possible v2 source address format is:
+            %%  /queues/:queue
+            try rabbit_uri:urldecode(QNameBinQuoted) of
+                QNameBin ->
+                    QName = queue_resource(Vhost, QNameBin),
+                    ok = exit_if_absent(QName),
+                    {ok, QName, PermCache, TopicPermCache}
+            catch error:_ ->
+                      {error, {bad_address, Address}}
+            end;
         {utf8, SourceAddr} ->
             case address_v1_permitted() of
-                true -> ensure_source_v1(
-                          SourceAddr, Vhost, User, Durable, PermCache, TopicPermCache);
-                false -> ensure_source_v2(
-                           SourceAddr, Vhost, PermCache, TopicPermCache)
+                true ->
+                    ensure_source_v1(SourceAddr, Vhost, User, Durable,
+                                     PermCache, TopicPermCache);
+                false ->
+                    {error, {amqp_address_v1_not_permitted, Address}}
             end;
         _ ->
             {error, {bad_address, Address}}
@@ -2476,18 +2484,9 @@ ensure_source_v1(Address,
                             Err
                     end
             end;
-        {error, _} ->
-            ensure_source_v2(Address, Vhost, PermCache0, TopicPermCache0)
+        {error, _} = Err ->
+            Err
     end.
-
-%% The only possible v2 source address format is:
-%%  /queue/:queue
-ensure_source_v2(<<"/queue/", QNameBin/binary>>, Vhost, PermCache, TopicPermCache) ->
-    QName = queue_resource(Vhost, QNameBin),
-    ok = exit_if_absent(QName),
-    {ok, QName, PermCache, TopicPermCache};
-ensure_source_v2(Address, _, _, _) ->
-    {error, {bad_address, Address}}.
 
 -spec ensure_target(#'v1_0.target'{},
                     rabbit_types:vhost(),
@@ -2504,29 +2503,28 @@ ensure_target(#'v1_0.target'{dynamic = true}, _, _, _) ->
 ensure_target(#'v1_0.target'{address = Address,
                              durable = Durable},
               Vhost, User, PermCache) ->
-    case address_v1_permitted() of
-        true ->
-            try_target_v1(Address, Vhost, User, Durable, PermCache);
-        false ->
-            try_target_v2(Address, Vhost, User, PermCache)
-    end.
-
-try_target_v1(Address, Vhost, User, Durable, PermCache0) ->
-    case ensure_target_v1(Address, Vhost, User, Durable, PermCache0) of
-        {ok, XNameBin, RKey, QNameBin, PermCache} ->
-            check_exchange(XNameBin, RKey, QNameBin, User, Vhost, PermCache);
-        {error, _} ->
-            try_target_v2(Address, Vhost, User, PermCache0)
-    end.
-
-try_target_v2(Address, Vhost, User, PermCache) ->
-    case ensure_target_v2(Address, Vhost) of
-        {ok, to, RKey, QNameBin} ->
-            {ok, to, RKey, QNameBin, PermCache};
-        {ok, XNameBin, RKey, QNameBin} ->
-            check_exchange(XNameBin, RKey, QNameBin, User, Vhost, PermCache);
-        {error, _} = Err ->
-            Err
+    case target_address_version(Address) of
+        2 ->
+            case ensure_target_v2(Address, Vhost) of
+                {ok, to, RKey, QNameBin} ->
+                    {ok, to, RKey, QNameBin, PermCache};
+                {ok, XNameBin, RKey, QNameBin} ->
+                    check_exchange(XNameBin, RKey, QNameBin, User, Vhost, PermCache);
+                {error, _} = Err ->
+                    Err
+            end;
+        1 ->
+            case address_v1_permitted() of
+                true ->
+                    case ensure_target_v1(Address, Vhost, User, Durable, PermCache) of
+                        {ok, XNameBin, RKey, QNameBin, PermCache1} ->
+                            check_exchange(XNameBin, RKey, QNameBin, User, Vhost, PermCache1);
+                        {error, _} = Err ->
+                            Err
+                    end;
+                false ->
+                    {error, {amqp_address_v1_not_permitted, Address}}
+            end
     end.
 
 check_exchange(XNameBin, RKey, QNameBin, User, Vhost, PermCache0) ->
@@ -2548,6 +2546,78 @@ check_exchange(XNameBin, RKey, QNameBin, User, Vhost, PermCache0) ->
             exit_not_found(XName)
     end.
 
+address_v1_permitted() ->
+    rabbit_deprecated_features:is_permitted(amqp_address_v1).
+
+target_address_version({utf8, <<"/exchanges/", _/binary>>}) ->
+    2;
+target_address_version({utf8, <<"/queues/", _/binary>>}) ->
+    2;
+target_address_version(undefined) ->
+    %% anonymous terminus
+    %% https://docs.oasis-open.org/amqp/anonterm/v1.0/cs01/anonterm-v1.0-cs01.html#doc-anonymous-relay
+    2;
+target_address_version(_Address) ->
+    1.
+
+%% The possible v2 target address formats are:
+%%  /exchanges/:exchange/:routing-key
+%%  /exchanges/:exchange
+%%  /queues/:queue
+%%  <null>
+ensure_target_v2({utf8, String}, Vhost) ->
+    case parse_target_v2_string(String) of
+        {ok, _XNameBin, _RKey, undefined} = Ok ->
+            Ok;
+        {ok, _XNameBin, _RKey, QNameBin} = Ok ->
+            ok = exit_if_absent(queue, Vhost, QNameBin),
+            Ok;
+        {error, bad_address} ->
+            {error, {bad_address_string, String}}
+    end;
+ensure_target_v2(undefined, _) ->
+    %% anonymous terminus
+    %% https://docs.oasis-open.org/amqp/anonterm/v1.0/cs01/anonterm-v1.0-cs01.html#doc-anonymous-relay
+    {ok, to, to, undefined}.
+
+parse_target_v2_string(String) ->
+    try parse_target_v2_string0(String)
+    catch error:_ ->
+              {error, bad_address}
+    end.
+
+parse_target_v2_string0(<<"/exchanges/", Rest/binary>>) ->
+    Key = cp_slash,
+    Pattern = try persistent_term:get(Key)
+              catch error:badarg ->
+                        Cp = binary:compile_pattern(<<"/">>),
+                        ok = persistent_term:put(Key, Cp),
+                        Cp
+              end,
+    case binary:split(Rest, Pattern, [global]) of
+        [?DEFAULT_EXCHANGE_NAME | _] ->
+            {error, bad_address};
+        [<<"amq.default">> | _] ->
+            {error, bad_address};
+        [XNameBinQuoted] ->
+            XNameBin = rabbit_uri:urldecode(XNameBinQuoted),
+            {ok, XNameBin, <<>>, undefined};
+        [XNameBinQuoted, RKeyQuoted] ->
+            XNameBin = rabbit_uri:urldecode(XNameBinQuoted),
+            RKey = rabbit_uri:urldecode(RKeyQuoted),
+            {ok, XNameBin, RKey, undefined};
+        _ ->
+            {error, bad_address}
+    end;
+parse_target_v2_string0(<<"/queues/">>) ->
+    %% empty queue name is invalid
+    {error, bad_address};
+parse_target_v2_string0(<<"/queues/", QNameBinQuoted/binary>>) ->
+    QNameBin = rabbit_uri:urldecode(QNameBinQuoted),
+    {ok, ?DEFAULT_EXCHANGE_NAME, QNameBin, QNameBin};
+parse_target_v2_string0(_) ->
+    {error, bad_address}.
+
 ensure_target_v1({utf8, Address}, Vhost, User, Durable, PermCache0) ->
     case rabbit_routing_parser:parse_endpoint(Address, true) of
         {ok, Dest} ->
@@ -2566,61 +2636,6 @@ ensure_target_v1({utf8, Address}, Vhost, User, Durable, PermCache0) ->
     end;
 ensure_target_v1(Address, _, _, _, _) ->
     {error, {bad_address, Address}}.
-
-%% The possible v2 target address formats are:
-%%  /exchange/:exchange/key/:routing-key
-%%  /exchange/:exchange
-%%  /queue/:queue
-%%  <null>
-ensure_target_v2({utf8, String}, Vhost) ->
-    case parse_target_v2_string(String) of
-        {ok, _XNameBin, _RKey, undefined} = Ok ->
-            Ok;
-        {ok, _XNameBin, _RKey, QNameBin} = Ok ->
-            ok = exit_if_absent(queue, Vhost, QNameBin),
-            Ok;
-        {error, bad_address} ->
-            {error, {bad_address_string, String}}
-    end;
-ensure_target_v2(undefined, _) ->
-    %% anonymous terminus
-    %% https://docs.oasis-open.org/amqp/anonterm/v1.0/cs01/anonterm-v1.0-cs01.html#doc-anonymous-relay
-    {ok, to, to, undefined};
-ensure_target_v2(Address, _) ->
-    {error, {bad_address, Address}}.
-
-parse_target_v2_string(<<"/exchange/", Rest/binary>>) ->
-    case split_exchange_target(Rest) of
-        {?DEFAULT_EXCHANGE_NAME, _} ->
-            {error, bad_address};
-        {<<"amq.default">>, _} ->
-            {error, bad_address};
-        {XNameBin, RKey} ->
-            {ok, XNameBin, RKey, undefined}
-    end;
-parse_target_v2_string(<<"/queue/">>) ->
-    %% empty queue name is invalid
-    {error, bad_address};
-parse_target_v2_string(<<"/queue/", QNameBin/binary>>) ->
-    {ok, ?DEFAULT_EXCHANGE_NAME, QNameBin, QNameBin};
-parse_target_v2_string(_) ->
-    {error, bad_address}.
-
-%% Empty exchange name (default exchange) is valid.
-split_exchange_target(Target) ->
-    Key = cp_amqp_target_address,
-    Pattern = try persistent_term:get(Key)
-              catch error:badarg ->
-                        Cp = binary:compile_pattern(<<"/key/">>),
-                        ok = persistent_term:put(Key, Cp),
-                        Cp
-              end,
-    case binary:split(Target, Pattern) of
-        [XNameBin] ->
-            {XNameBin, <<>>};
-        [XNameBin, RoutingKey] ->
-            {XNameBin, RoutingKey}
-    end.
 
 handle_outgoing_mgmt_link_flow_control(
   #management_link{delivery_count = DeliveryCountSnd} = Link0,
@@ -3094,23 +3109,30 @@ queue_is_durable(undefined) ->
     %% [3.5.3]
     queue_is_durable(?V_1_0_TERMINUS_DURABILITY_NONE).
 
--spec remove_link_from_outgoing_unsettled_map(link_handle() | rabbit_types:ctag(), Map) ->
-    {Map, [rabbit_amqqueue:msg_id()]}
+-spec remove_outgoing_link(link_handle() | rabbit_types:ctag(), Map, queue:queue()) ->
+    {Map, queue:queue()}
       when Map :: #{delivery_number() => #outgoing_unsettled{}}.
-remove_link_from_outgoing_unsettled_map(Handle, Map)
+remove_outgoing_link(Handle, Map, Queue)
   when is_integer(Handle) ->
-    remove_link_from_outgoing_unsettled_map(handle_to_ctag(Handle), Map);
-remove_link_from_outgoing_unsettled_map(Ctag, Map)
+    Ctag = handle_to_ctag(Handle),
+    remove_outgoing_link(Ctag, Map, Queue);
+remove_outgoing_link(Ctag, OutgoingUnsettledMap0, OutgoingPending0)
   when is_binary(Ctag) ->
-    maps:fold(fun(DeliveryId,
-                  #outgoing_unsettled{consumer_tag = Tag,
-                                      msg_id = Id},
-                  {M, Ids})
-                    when Tag =:= Ctag ->
-                      {maps:remove(DeliveryId, M), [Id | Ids]};
-                 (_, _, Acc) ->
-                      Acc
-              end, {Map, []}, Map).
+    OutgoingUnsettledMap = maps:filter(
+                             fun(_DeliveryId, #outgoing_unsettled{consumer_tag = Tag}) ->
+                                     Tag =/= Ctag
+                             end, OutgoingUnsettledMap0),
+    OutgoingPending = queue:filter(
+                        fun(#pending_delivery{outgoing_unsettled = #outgoing_unsettled{consumer_tag = Tag}}) ->
+                                Tag =/= Ctag;
+                           ({credit_reply, Tag, _DeliveryCount, _Credit, _Available, _Drain}) ->
+                                Tag =/= Ctag;
+                           (#pending_management_delivery{}) ->
+                                true;
+                           (#'v1_0.flow'{}) ->
+                                true
+                        end, OutgoingPending0),
+    {OutgoingUnsettledMap, OutgoingPending}.
 
 messages_received(Settled) ->
     rabbit_global_counters:messages_received(?PROTOCOL, 1),
@@ -3357,13 +3379,23 @@ error_not_found(Resource) ->
        condition = ?V_1_0_AMQP_ERROR_NOT_FOUND,
        description = {utf8, Description}}.
 
-address_v1_permitted() ->
-    rabbit_deprecated_features:is_permitted(amqp_address_v1).
-
 -spec cap_credit(rabbit_queue_type:credit()) ->
     0..?LINK_CREDIT_RCV_FROM_QUEUE_MAX.
 cap_credit(DesiredCredit) ->
     min(DesiredCredit, ?LINK_CREDIT_RCV_FROM_QUEUE_MAX).
+
+ensure_mc_cluster_compat(Mc) ->
+    IsEnabled = rabbit_feature_flags:is_enabled(message_containers_store_amqp_v1),
+    case IsEnabled of
+        true ->
+            Mc;
+        false ->
+            McEnv = #{message_containers_store_amqp_v1 => IsEnabled},
+            %% other nodes in the cluster may not understand the new internal
+            %% amqp mc format - in this case we convert to AMQP legacy format
+            %% for compatibility
+            mc:convert(mc_amqpl, Mc, McEnv)
+    end.
 
 format_status(
   #{state := #state{cfg = Cfg,
@@ -3409,16 +3441,3 @@ format_status(
               permission_cache => PermissionCache,
               topic_permission_cache => TopicPermissionCache},
     maps:update(state, State, Status).
-
-ensure_mc_cluster_compat(Mc) ->
-    IsEnabled = rabbit_feature_flags:is_enabled(message_containers_store_amqp_v1),
-    case IsEnabled of
-        true ->
-            Mc;
-        false ->
-            McEnv = #{message_containers_store_amqp_v1 => IsEnabled},
-            %% other nodes in the cluster may not understand the new internal
-            %% amqp mc format - in this case we convert to AMQP legacy format
-            %% for compatibility
-            mc:convert(mc_amqpl, Mc, McEnv)
-    end.

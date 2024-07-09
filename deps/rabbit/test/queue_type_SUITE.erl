@@ -35,9 +35,13 @@ groups() ->
     ].
 
 init_per_suite(Config0) ->
+    Tick = 256,
     rabbit_ct_helpers:log_environment(),
     Config = rabbit_ct_helpers:merge_app_env(
-               Config0, {rabbit, [{quorum_tick_interval, 1000}]}),
+               Config0, {rabbit, [
+                                  {quorum_tick_interval, Tick},
+                                  {stream_tick_interval, Tick}
+                                 ]}),
     rabbit_ct_helpers:run_setup_steps(Config).
 
 end_per_suite(Config) ->
@@ -49,10 +53,12 @@ init_per_group(Group, Config) ->
     Config1 = rabbit_ct_helpers:set_config(Config,
                                            [{rmq_nodes_count, ClusterSize},
                                             {rmq_nodename_suffix, Group},
-                                            {tcp_ports_base}]),
+                                            {tcp_ports_base, {skip_n_nodes, ClusterSize}}
+                                            ]),
     Config1b = rabbit_ct_helpers:set_config(Config1,
                                             [{queue_type, atom_to_binary(Group, utf8)},
-                                             {net_ticktime, 10}]),
+                                             {net_ticktime, 5}
+                                            ]),
     Config2 = rabbit_ct_helpers:run_steps(Config1b,
                                           [fun merge_app_env/1 ] ++
                                           rabbit_ct_broker_helpers:setup_steps()),
@@ -65,14 +71,6 @@ init_per_group(Group, Config) ->
             ok = rabbit_ct_broker_helpers:rpc(
                    Config2, 0, application, set_env,
                    [rabbit, channel_tick_interval, 100]),
-            %% HACK: the larger cluster sizes benefit for a bit more time
-            %% after clustering before running the tests.
-            case Group of
-                cluster_size_5 ->
-                    timer:sleep(5000);
-                _ ->
-                    ok
-            end,
             Config2
     end.
 

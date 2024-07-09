@@ -148,13 +148,6 @@
                    [{description, "kernel ready"},
                     {requires,    external_infrastructure}]}).
 
--rabbit_boot_step({rabbit_memory_monitor,
-                   [{description, "memory monitor"},
-                    {mfa,         {rabbit_sup, start_restartable_child,
-                                   [rabbit_memory_monitor]}},
-                    {requires,    rabbit_alarm},
-                    {enables,     core_initialized}]}).
-
 -rabbit_boot_step({guid_generator,
                    [{description, "guid generator"},
                     {mfa,         {rabbit_sup, start_restartable_child,
@@ -226,12 +219,6 @@
                    [{description, "background core metrics garbage collection"},
                     {mfa,         {rabbit_sup, start_restartable_child,
                                    [rabbit_core_metrics_gc]}},
-                    {requires,    [core_initialized, recovery]},
-                    {enables,     routing_ready}]}).
-
--rabbit_boot_step({rabbit_looking_glass,
-                   [{description, "Looking Glass tracer and profiler"},
-                    {mfa,         {rabbit_looking_glass, boot, []}},
                     {requires,    [core_initialized, recovery]},
                     {enables,     routing_ready}]}).
 
@@ -1663,8 +1650,9 @@ config_files() ->
 start_fhc() ->
     ok = rabbit_sup:start_restartable_child(
       file_handle_cache,
-      [fun rabbit_alarm:set_alarm/1, fun rabbit_alarm:clear_alarm/1]),
-    ensure_working_fhc().
+      [fun(_) -> ok end, fun(_) -> ok end]),
+    ensure_working_fhc(),
+    maybe_warn_low_fd_limit().
 
 ensure_working_fhc() ->
     %% To test the file handle cache, we simply read a file we know it
@@ -1702,6 +1690,16 @@ ensure_working_fhc() ->
         {'EXIT', TestPid, Exception} -> throw({ensure_working_fhc, Exception})
     after Timeout ->
             throw({ensure_working_fhc, {timeout, TestPid}})
+    end.
+
+maybe_warn_low_fd_limit() ->
+    case file_handle_cache:ulimit() of
+        %% unknown is included as atom() > integer().
+        L when L > 1024 ->
+            ok;
+        L ->
+            rabbit_log:warning("Available file handles: ~tp. "
+                "Please consider increasing system limits", [L])
     end.
 
 %% Any configuration that
