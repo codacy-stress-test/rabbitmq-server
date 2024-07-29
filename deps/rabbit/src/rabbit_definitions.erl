@@ -773,7 +773,7 @@ add_policy(VHost, Param, Username) ->
                              exit(rabbit_data_coercion:to_binary(rabbit_misc:escape_html_tags(E ++ S)))
     end.
 
--spec add_vhost(map(), rabbit_types:username()) -> ok.
+-spec add_vhost(map(), rabbit_types:username()) -> ok | no_return().
 
 add_vhost(VHost, ActingUser) ->
     Name             = maps:get(name, VHost, undefined),
@@ -783,7 +783,12 @@ add_vhost(VHost, ActingUser) ->
     Tags             = maps:get(tags, VHost, maps:get(tags, Metadata, [])),
     DefaultQueueType = maps:get(default_queue_type, Metadata, undefined),
 
-    rabbit_vhost:put_vhost(Name, Description, Tags, DefaultQueueType, IsTracingEnabled, ActingUser).
+    case rabbit_vhost:put_vhost(Name, Description, Tags, DefaultQueueType, IsTracingEnabled, ActingUser) of
+        ok ->
+            ok;
+        {error, _} = Err ->
+            throw(Err)
+    end.
 
 add_permission(Permission, ActingUser) ->
     rabbit_auth_backend_internal:set_permissions(maps:get(user,      Permission, undefined),
@@ -863,13 +868,18 @@ add_exchange_int(Exchange, Name, ActingUser) ->
                            undefined -> false; %% =< 2.2.0
                            I         -> I
                        end,
-            rabbit_exchange:declare(Name,
-                                    rabbit_exchange:check_type(maps:get(type, Exchange, undefined)),
-                                    maps:get(durable,                         Exchange, undefined),
-                                    maps:get(auto_delete,                     Exchange, undefined),
-                                    Internal,
-                                    args(maps:get(arguments, Exchange, undefined)),
-                                    ActingUser)
+            case rabbit_exchange:declare(Name,
+                                         rabbit_exchange:check_type(maps:get(type, Exchange, undefined)),
+                                         maps:get(durable,                         Exchange, undefined),
+                                         maps:get(auto_delete,                     Exchange, undefined),
+                                         Internal,
+                                         args(maps:get(arguments, Exchange, undefined)),
+                                         ActingUser) of
+                {ok, _Exchange} ->
+                    ok;
+                {error, timeout} = Err ->
+                    throw(Err)
+            end
     end.
 
 add_binding(Binding, ActingUser) ->
@@ -883,12 +893,17 @@ add_binding(VHost, Binding, ActingUser) ->
                     rv(VHost, DestType, destination, Binding), ActingUser).
 
 add_binding_int(Binding, Source, Destination, ActingUser) ->
-    rabbit_binding:add(
-      #binding{source       = Source,
-               destination  = Destination,
-               key          = maps:get(routing_key, Binding, undefined),
-               args         = args(maps:get(arguments, Binding, undefined))},
-      ActingUser).
+    case rabbit_binding:add(
+           #binding{source       = Source,
+                    destination  = Destination,
+                    key          = maps:get(routing_key, Binding, undefined),
+                    args         = args(maps:get(arguments, Binding, undefined))},
+           ActingUser) of
+        ok ->
+            ok;
+        {error, _} = Err ->
+            throw(Err)
+    end.
 
 dest_type(Binding) ->
     rabbit_data_coercion:to_atom(maps:get(destination_type, Binding, undefined)).

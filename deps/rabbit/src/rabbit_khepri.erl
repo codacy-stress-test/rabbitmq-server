@@ -180,6 +180,17 @@
          clear_forced_metadata_store/0]).
 -endif.
 
+-type timeout_error() :: khepri:error(timeout).
+%% Commands like 'put'/'delete' etc. might time out in Khepri. It might take
+%% the leader longer to apply the command and reply to the caller than the
+%% configured timeout. This error is easy to reproduce - a cluster which is
+%% only running a minority of nodes will consistently return `{error, timeout}`
+%% for commands until the cluster majority can be re-established. Commands
+%% returning `{error, timeout}` are a likely (but not certain) indicator that
+%% the node which submitted the command is running in a minority.
+
+-export_type([timeout_error/0]).
+
 -compile({no_auto_import, [get/1, get/2, nodes/0]}).
 
 -define(RA_SYSTEM, coordination).
@@ -252,7 +263,7 @@ setup(_) ->
     case khepri:start(?RA_SYSTEM, RaServerConfig) of
         {ok, ?STORE_ID} ->
             wait_for_leader(),
-            register_projections(),
+            wait_for_register_projections(),
             ?LOG_DEBUG(
                "Khepri-based " ?RA_FRIENDLY_NAME " ready",
                #{domain => ?RMQLOG_DOMAIN_GLOBAL}),
@@ -287,10 +298,27 @@ wait_for_leader(Timeout, Retries) ->
         Exists when is_boolean(Exists) ->
             rabbit_log:info("Khepri leader elected"),
             ok;
-        {error, {timeout, _ServerId}} ->
+        {error, timeout} -> %% Khepri >= 0.14.0
+            wait_for_leader(Timeout, Retries -1);
+        {error, {timeout, _ServerId}} -> %% Khepri < 0.14.0
             wait_for_leader(Timeout, Retries -1);
         {error, Reason} ->
             throw(Reason)
+    end.
+
+wait_for_register_projections() ->
+    wait_for_register_projections(retry_timeout(), retry_limit()).
+
+wait_for_register_projections(_Timeout, 0) ->
+    exit(timeout_waiting_for_khepri_projections);
+wait_for_register_projections(Timeout, Retries) ->
+    rabbit_log:info("Waiting for Khepri projections for ~tp ms, ~tp retries left",
+                    [Timeout, Retries - 1]),
+    try
+        register_projections()
+    catch
+        throw : timeout ->
+            wait_for_register_projections(Timeout, Retries -1)
     end.
 
 %% @private
@@ -491,13 +519,13 @@ remove_down_member(NodeToRemove) ->
                [NodeToRemove, ?RA_CLUSTER_NAME, Reason],
                #{domain => ?RMQLOG_DOMAIN_GLOBAL}),
             Error;
-        {timeout, _} = Reason ->
+        {timeout, _LeaderId} ->
             ?LOG_ERROR(
                "Failed to remove remote down node ~s from Khepri "
-               "cluster \"~s\": ~p",
-               [NodeToRemove, ?RA_CLUSTER_NAME, Reason],
+               "cluster \"~s\" due to timeout",
+               [NodeToRemove, ?RA_CLUSTER_NAME],
                #{domain => ?RMQLOG_DOMAIN_GLOBAL}),
-            {error, Reason}
+            {error, timeout}
     end.
 
 %% @private

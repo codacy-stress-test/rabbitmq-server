@@ -72,6 +72,8 @@
 -define(MNESIA_TABLE, rabbit_user).
 -define(PERM_MNESIA_TABLE, rabbit_user_permission).
 -define(TOPIC_PERM_MNESIA_TABLE, rabbit_topic_permission).
+-define(KHEPRI_USERS_PROJECTION, rabbit_khepri_users).
+-define(KHEPRI_PERMISSIONS_PROJECTION, rabbit_khepri_user_permissions).
 
 %% -------------------------------------------------------------------
 %% create().
@@ -185,9 +187,12 @@ get_in_mnesia(Username) ->
     end.
 
 get_in_khepri(Username) ->
-    case ets:lookup(rabbit_khepri_users, Username) of
+    try ets:lookup(?KHEPRI_USERS_PROJECTION, Username) of
         [User] -> User;
         _      -> undefined
+    catch
+        error:badarg ->
+            undefined
     end.
 
 %% -------------------------------------------------------------------
@@ -292,9 +297,14 @@ get_user_permissions_in_mnesia(Username, VHostName) ->
 get_user_permissions_in_khepri(Username, VHostName) ->
     UserVHost = #user_vhost{username     = Username,
                             virtual_host = VHostName},
-    case ets:lookup(rabbit_khepri_user_permissions, UserVHost) of
-        [UserPermission] -> UserPermission;
-        _      -> undefined
+    try ets:lookup(?KHEPRI_PERMISSIONS_PROJECTION, UserVHost) of
+        [UserPermission] ->
+            UserPermission;
+        _ ->
+            undefined
+    catch
+        error:badarg ->
+            undefined
     end.
 
 %% -------------------------------------------------------------------

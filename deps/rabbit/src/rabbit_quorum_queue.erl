@@ -17,6 +17,7 @@
          handle_event/3]).
 -export([is_recoverable/1,
          recover/2,
+         system_recover/1,
          stop/1,
          start_server/1,
          restart_server/1,
@@ -96,6 +97,11 @@
 
 -define(RA_SYSTEM, quorum_queues).
 -define(RA_WAL_NAME, ra_log_wal).
+
+-define(INFO(Str, Args),
+        rabbit_log:info("[~s:~s/~b] " Str,
+                        [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
+
 
 -define(STATISTICS_KEYS,
         [policy,
@@ -641,6 +647,21 @@ is_recoverable(Q) when ?is_amqqueue(Q) and ?amqqueue_is_quorum(Q) ->
     Nodes = get_nodes(Q),
     lists:member(Node, Nodes).
 
+system_recover(quorum_queues) ->
+    case rabbit:is_booted() of
+        true ->
+            Queues = rabbit_amqqueue:list_local_quorum_queues(),
+            ?INFO("recovering ~b queues", [length(Queues)]),
+            {Recovered, Failed} = recover(<<>>, Queues),
+            ?INFO("recovered ~b queues, "
+                  "failed to recover ~b queues",
+                  [length(Recovered), length(Failed)]),
+            ok;
+        false ->
+            ?INFO("rabbit not booted, skipping queue recovery", []),
+            ok
+    end.
+
 -spec recover(binary(), [amqqueue:amqqueue()]) ->
     {[amqqueue:amqqueue()], [amqqueue:amqqueue()]}.
 recover(_Vhost, Queues) ->
@@ -1042,12 +1063,12 @@ cleanup_data_dir() ->
     ok.
 
 maybe_delete_data_dir(UId) ->
+    _ = ra_directory:unregister_name(?RA_SYSTEM, UId),
     Dir = ra_env:server_data_dir(?RA_SYSTEM, UId),
     {ok, Config} = ra_log:read_config(Dir),
     case maps:get(machine, Config) of
         {module, rabbit_fifo, _} ->
-            ra_lib:recursive_delete(Dir),
-            ra_directory:unregister_name(?RA_SYSTEM, UId);
+            ra_lib:recursive_delete(Dir);
         _ ->
             ok
     end.

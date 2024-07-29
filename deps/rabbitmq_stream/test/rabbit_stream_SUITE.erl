@@ -37,8 +37,7 @@ all() ->
 
 groups() ->
     [{single_node, [],
-      [filtering_ff, %% must stay at the top, feature flag disabled for this one
-       test_stream,
+      [test_stream,
        test_stream_tls,
        test_publish_v2,
        test_super_stream_creation_deletion,
@@ -62,7 +61,9 @@ groups() ->
        should_receive_metadata_update_after_update_secret,
        store_offset_requires_read_access,
        offset_lag_calculation,
-       test_super_stream_duplicate_partitions
+       test_super_stream_duplicate_partitions,
+       authentication_error_should_close_with_delay,
+       unauthorized_vhost_access_should_close_with_delay
       ]},
      %% Run `test_global_counters` on its own so the global metrics are
      %% initialised to 0 for each testcase
@@ -174,6 +175,10 @@ init_per_testcase(store_offset_requires_read_access = TestCase, Config) ->
   ok = rabbit_ct_broker_helpers:add_user(Config, <<"test">>),
   rabbit_ct_helpers:testcase_started(Config, TestCase);
 
+init_per_testcase(unauthorized_vhost_access_should_close_with_delay = TestCase, Config) ->
+  ok = rabbit_ct_broker_helpers:add_user(Config, <<"other">>),
+  rabbit_ct_helpers:testcase_started(Config, TestCase);
+
 init_per_testcase(TestCase, Config) ->
     rabbit_ct_helpers:testcase_started(Config, TestCase).
 
@@ -185,13 +190,6 @@ end_per_testcase(cannot_update_username_after_authenticated = TestCase, Config) 
     ok = rabbit_ct_broker_helpers:delete_user(Config, <<"other">>),
     rabbit_ct_helpers:testcase_finished(Config, TestCase);
 
-end_per_testcase(filtering_ff = TestCase, Config) ->
-    _ = rabbit_ct_broker_helpers:rpc(Config,
-                                     0,
-                                     rabbit_feature_flags,
-                                     enable,
-                                     [stream_filtering]),
-    rabbit_ct_helpers:testcase_finished(Config, TestCase);
 end_per_testcase(close_connection_on_consumer_update_timeout = TestCase, Config) ->
     ok = rabbit_ct_broker_helpers:rpc(Config,
                                       0,
@@ -209,34 +207,11 @@ end_per_testcase(vhost_queue_limit = TestCase, Config) ->
 end_per_testcase(store_offset_requires_read_access = TestCase, Config) ->
     ok = rabbit_ct_broker_helpers:delete_user(Config, <<"test">>),
     rabbit_ct_helpers:testcase_finished(Config, TestCase);
+end_per_testcase(unauthorized_vhost_access_should_close_with_delay = TestCase, Config) ->
+    ok = rabbit_ct_broker_helpers:delete_user(Config, <<"other">>),
+    rabbit_ct_helpers:testcase_finished(Config, TestCase);
 end_per_testcase(TestCase, Config) ->
     rabbit_ct_helpers:testcase_finished(Config, TestCase).
-
-filtering_ff(Config) ->
-    Stream = atom_to_binary(?FUNCTION_NAME, utf8),
-    Transport = gen_tcp,
-    Port = get_stream_port(Config),
-    Opts = [{active, false}, {mode, binary}],
-    {ok, S} = Transport:connect("localhost", Port, Opts),
-    C0 = rabbit_stream_core:init(0),
-    C1 = test_peer_properties(Transport, S, C0),
-    C2 = test_authenticate(Transport, S, C1),
-    C3 = test_create_stream(Transport, S, Stream, C2),
-    PublisherId = 42,
-    C4 = test_declare_publisher(Transport, S, PublisherId, Stream, C3),
-    Body = <<"hello">>,
-    C5 = test_publish_confirm(Transport, S, publish_v2, PublisherId, Body,
-                               publish_error, C4),
-    SubscriptionId = 42,
-    C6 = test_subscribe(Transport, S, SubscriptionId, Stream,
-                        #{<<"filter.0">> => <<"foo">>},
-                        ?RESPONSE_CODE_PRECONDITION_FAILED,
-                        C5),
-
-    C7 = test_delete_stream(Transport, S, Stream, C6),
-    _C8 = test_close(Transport, S, C7),
-    closed = wait_for_socket_close(Transport, S, 10),
-    ok.
 
 test_global_counters(Config) ->
     Stream = atom_to_binary(?FUNCTION_NAME, utf8),
@@ -924,6 +899,41 @@ offset_lag_calculation(Config) ->
 
     ok.
 
+authentication_error_should_close_with_delay(Config) ->
+    T = gen_tcp,
+    Port = get_port(T, Config),
+    Opts = get_opts(T),
+    {ok, S} = T:connect("localhost", Port, Opts),
+    C0 = rabbit_stream_core:init(0),
+    C1 = test_peer_properties(T, S, C0),
+    Start = erlang:monotonic_time(millisecond),
+    _ = expect_unsuccessful_authentication(
+      try_authenticate(T, S, C1, <<"PLAIN">>, <<"guest">>, <<"wrong password">>),
+        ?RESPONSE_AUTHENTICATION_FAILURE),
+    End = erlang:monotonic_time(millisecond),
+    %% the stream reader module defines the delay (3 seconds)
+    ?assert(End - Start > 2_000),
+    closed = wait_for_socket_close(T, S, 10),
+    ok.
+
+unauthorized_vhost_access_should_close_with_delay(Config) ->
+    T = gen_tcp,
+    Port = get_port(T, Config),
+    Opts = get_opts(T),
+    {ok, S} = T:connect("localhost", Port, Opts),
+    C0 = rabbit_stream_core:init(0),
+    C1 = test_peer_properties(T, S, C0),
+    User = <<"other">>,
+    C2 = test_plain_sasl_authenticate(T, S, sasl_handshake(T, S, C1), User),
+    Start = erlang:monotonic_time(millisecond),
+    R = do_tune(T, S, C2),
+    ?assertMatch({{response,_,{open,12}}, _}, R),
+    End = erlang:monotonic_time(millisecond),
+    %% the stream reader module defines the delay (3 seconds)
+    ?assert(End - Start > 2_000),
+    closed = wait_for_socket_close(T, S, 10),
+    ok.
+
 consumer_offset_info(Config, ConnectionName) ->
     [[{offset, Offset},
       {offset_lag, Lag}]] = rpc(Config, 0, ?MODULE,
@@ -1127,12 +1137,15 @@ test_peer_properties(Transport, S, Properties, C0) ->
     C.
 
 test_authenticate(Transport, S, C0) ->
-  tune(Transport, S,
-       test_plain_sasl_authenticate(Transport, S, sasl_handshake(Transport, S, C0), <<"guest">>)).
+    tune(Transport, S,
+         test_plain_sasl_authenticate(Transport, S, sasl_handshake(Transport, S, C0), <<"guest">>)).
 
 test_authenticate(Transport, S, C0, Username) ->
-  tune(Transport, S,
-       test_plain_sasl_authenticate(Transport, S, sasl_handshake(Transport, S, C0), Username)).
+    test_authenticate(Transport, S, C0, Username, Username).
+
+test_authenticate(Transport, S, C0, Username, Password) ->
+    tune(Transport, S,
+         test_plain_sasl_authenticate(Transport, S, sasl_handshake(Transport, S, C0), Username, Password)).
 
 sasl_handshake(Transport, S, C0) ->
     SaslHandshakeFrame = request(sasl_handshake),
@@ -1149,7 +1162,10 @@ sasl_handshake(Transport, S, C0) ->
     C1.
 
 test_plain_sasl_authenticate(Transport, S, C1, Username) ->
-  expect_successful_authentication(plain_sasl_authenticate(Transport, S, C1, Username, Username)).
+    test_plain_sasl_authenticate(Transport, S, C1, Username, Username).
+
+test_plain_sasl_authenticate(Transport, S, C1, Username, Password) ->
+    expect_successful_authentication(plain_sasl_authenticate(Transport, S, C1, Username, Password)).
 
 plain_sasl_authenticate(Transport, S, C1, Username, Password) ->
     Null = 0,
@@ -1170,6 +1186,10 @@ sasl_authenticate(Transport, S, C1, AuthMethod, AuthBody) ->
     receive_commands(Transport, S, C1).
 
 tune(Transport, S, C2) ->
+    {{response, _, {open, ?RESPONSE_CODE_OK, _}}, C3} = do_tune(Transport, S, C2),
+    C3.
+
+do_tune(Transport, S, C2) ->
     {Tune, C3} = receive_commands(Transport, S, C2),
     {tune, ?DEFAULT_FRAME_MAX, ?DEFAULT_HEARTBEAT} = Tune,
 
@@ -1181,10 +1201,7 @@ tune(Transport, S, C2) ->
     VirtualHost = <<"/">>,
     OpenFrame = request(3, {open, VirtualHost}),
     ok = Transport:send(S, OpenFrame),
-    {{response, 3, {open, ?RESPONSE_CODE_OK, _ConnectionProperties}},
-     C4} =
-        receive_commands(Transport, S, C3),
-    C4.
+    receive_commands(Transport, S, C3).
 
 test_create_stream(Transport, S, Stream, C0) ->
     CreateStreamFrame = request({create_stream, Stream, #{}}),

@@ -52,6 +52,7 @@
 -endif.
 
 -define(MNESIA_TABLE, rabbit_vhost).
+-define(KHEPRI_PROJECTION, rabbit_khepri_vhost).
 
 %% -------------------------------------------------------------------
 %% create_or_get().
@@ -61,7 +62,7 @@
       VHostName :: vhost:name(),
       Limits :: vhost:limits(),
       Metadata :: vhost:metadata(),
-      Ret :: {existing | new, VHost},
+      Ret :: {existing | new, VHost} | no_return(),
       VHost :: vhost:vhost().
 %% @doc Writes a virtual host record if it doesn't exist already or returns
 %% the existing one.
@@ -116,7 +117,9 @@ create_or_get_in_khepri(VHostName, VHost) ->
 -spec merge_metadata(VHostName, Metadata) -> Ret when
       VHostName :: vhost:name(),
       Metadata :: vhost:metadata(),
-      Ret :: {ok, VHost} | {error, {no_such_vhost, VHostName}},
+      Ret :: {ok, VHost} |
+             {error, {no_such_vhost, VHostName}} |
+             rabbit_khepri:timeout_error(),
       VHost :: vhost:vhost().
 %% @doc Updates the metadata of an existing virtual host record.
 %%
@@ -187,7 +190,7 @@ merge_metadata_in_khepri(VHostName, Metadata) ->
 -spec set_tags(VHostName, Tags) -> VHost when
       VHostName :: vhost:name(),
       Tags :: [vhost:tag() | binary() | string()],
-      VHost :: vhost:vhost().
+      VHost :: vhost:vhost() | no_return().
 %% @doc Sets the tags of an existing virtual host record.
 %%
 %% @returns the updated virtual host record if the record existed and the
@@ -241,7 +244,12 @@ exists_in_mnesia(VHostName) ->
     mnesia:dirty_read({?MNESIA_TABLE, VHostName}) /= [].
 
 exists_in_khepri(VHostName) ->
-    ets:member(rabbit_khepri_vhost, VHostName).
+    try
+        ets:member(?KHEPRI_PROJECTION, VHostName)
+    catch
+        error:badarg ->
+            false
+    end.
 
 %% -------------------------------------------------------------------
 %% get().
@@ -269,9 +277,12 @@ get_in_mnesia(VHostName) ->
     end.
 
 get_in_khepri(VHostName) ->
-    case ets:lookup(rabbit_khepri_vhost, VHostName) of
+    try ets:lookup(?KHEPRI_PROJECTION, VHostName) of
         [Record] -> Record;
         _        -> undefined
+    catch
+        error:badarg ->
+            undefined
     end.
 
 %% -------------------------------------------------------------------
@@ -295,7 +306,12 @@ get_all_in_mnesia() ->
     mnesia:dirty_match_object(?MNESIA_TABLE, vhost:pattern_match_all()).
 
 get_all_in_khepri() ->
-    ets:tab2list(rabbit_khepri_vhost).
+    try
+        ets:tab2list(?KHEPRI_PROJECTION)
+    catch
+        error:badarg ->
+            []
+    end.
 
 %% -------------------------------------------------------------------
 %% list().
@@ -318,7 +334,13 @@ list_in_mnesia() ->
     mnesia:dirty_all_keys(?MNESIA_TABLE).
 
 list_in_khepri() ->
-    ets:select(rabbit_khepri_vhost, [{vhost:pattern_match_names(), [], ['$1']}]).
+    try
+        ets:select(
+          ?KHEPRI_PROJECTION, [{vhost:pattern_match_names(), [], ['$1']}])
+    catch
+        error:badarg ->
+            []
+    end.
 
 %% -------------------------------------------------------------------
 %% update_in_*tx().
@@ -327,7 +349,7 @@ list_in_khepri() ->
 -spec update(VHostName, UpdateFun) -> VHost when
       VHostName :: vhost:name(),
       UpdateFun :: fun((VHost) -> VHost),
-      VHost :: vhost:vhost().
+      VHost :: vhost:vhost() | no_return().
 %% @doc Updates an existing virtual host record using the result of
 %% `UpdateFun'.
 %%
@@ -419,9 +441,10 @@ with_fun_in_khepri_tx(VHostName, Thunk) ->
 %% delete().
 %% -------------------------------------------------------------------
 
--spec delete(VHostName) -> Existed when
+-spec delete(VHostName) -> Ret when
       VHostName :: vhost:name(),
-      Existed :: boolean().
+      Existed :: boolean(),
+      Ret :: Existed | rabbit_khepri:timeout_error().
 %% @doc Deletes a virtual host record from the database.
 %%
 %% @returns a boolean indicating if the vhost existed or not. It throws an
@@ -448,7 +471,7 @@ delete_in_khepri(VHostName) ->
     case rabbit_khepri:delete_or_fail(Path) of
         ok -> true;
         {error, {node_not_found, _}} -> false;
-        _ -> false
+        {error, _} = Err -> Err
     end.
 
 %% -------------------------------------------------------------------

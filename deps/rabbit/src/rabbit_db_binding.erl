@@ -53,6 +53,8 @@
 -define(MNESIA_SEMI_DURABLE_TABLE, rabbit_semi_durable_route).
 -define(MNESIA_REVERSE_TABLE, rabbit_reverse_route).
 -define(MNESIA_INDEX_TABLE, rabbit_index_route).
+-define(KHEPRI_BINDINGS_PROJECTION, rabbit_khepri_bindings).
+-define(KHEPRI_INDEX_ROUTE_PROJECTION, rabbit_khepri_index_route).
 
 %% -------------------------------------------------------------------
 %% exists().
@@ -118,7 +120,7 @@ exists_in_khepri(#binding{source = SrcName,
                        Errs ->
                            Errs
                    end
-           end) of
+           end, ro) of
         {ok, not_found} -> false;
         {ok, Set} -> sets:is_element(Binding, Set);
         Errs -> not_found_errs_in_khepri(not_found(Errs, SrcName, DstName))
@@ -148,8 +150,9 @@ not_found({[], []}, SrcName, DstName) ->
       Binding :: rabbit_types:binding(),
       Src :: rabbit_types:binding_source(),
       Dst :: rabbit_types:binding_destination(),
-      ChecksFun :: fun((Src, Dst) -> ok | {error, Reason :: any()}),
-      Ret :: ok | {error, Reason :: any()}.
+      ChecksFun :: fun((Src, Dst) -> ok | {error, ChecksErrReason}),
+      ChecksErrReason :: any(),
+      Ret :: ok | {error, ChecksErrReason} | rabbit_khepri:timeout_error().
 %% @doc Writes a binding if it doesn't exist already and passes the validation in
 %% `ChecksFun' i.e. exclusive access
 %%
@@ -253,8 +256,12 @@ serial_in_khepri(true, X) ->
       Binding :: rabbit_types:binding(),
       Src :: rabbit_types:binding_source(),
       Dst :: rabbit_types:binding_destination(),
-      ChecksFun :: fun((Src, Dst) -> ok | {error, Reason :: any()}),
-      Ret :: ok | {ok, rabbit_binding:deletions()} | {error, Reason :: any()}.
+      ChecksFun :: fun((Src, Dst) -> ok | {error, ChecksErrReason}),
+      ChecksErrReason :: any(),
+      Ret :: ok |
+             {ok, rabbit_binding:deletions()} |
+             {error, ChecksErrReason} |
+             rabbit_khepri:timeout_error().
 %% @doc Deletes a binding record from the database if it passes the validation in
 %% `ChecksFun'. It also triggers the deletion of auto-delete exchanges if needed.
 %%
@@ -411,7 +418,12 @@ get_all_in_mnesia() ->
       end).
 
 get_all_in_khepri() ->
-     [B || #route{binding = B} <- ets:tab2list(rabbit_khepri_bindings)].
+    try
+        [B || #route{binding = B} <- ets:tab2list(?KHEPRI_BINDINGS_PROJECTION)]
+    catch
+        error:badarg ->
+            []
+    end.
 
 -spec get_all(VHostName) -> [Binding] when
       VHostName :: vhost:name(),
@@ -437,11 +449,17 @@ get_all_in_mnesia(VHost) ->
     [B || #route{binding = B} <- rabbit_db:list_in_mnesia(?MNESIA_TABLE, Match)].
 
 get_all_in_khepri(VHost) ->
-    VHostResource = rabbit_misc:r(VHost, '_'),
-    Match = #route{binding = #binding{source      = VHostResource,
-                                      destination = VHostResource,
-                                      _           = '_'}},
-    [B || #route{binding = B} <- ets:match_object(rabbit_khepri_bindings, Match)].
+    try
+        VHostResource = rabbit_misc:r(VHost, '_'),
+        Match = #route{binding = #binding{source      = VHostResource,
+                                          destination = VHostResource,
+                                          _           = '_'}},
+        [B || #route{binding = B} <- ets:match_object(
+                                       ?KHEPRI_BINDINGS_PROJECTION, Match)]
+    catch
+        error:badarg ->
+            []
+    end.
 
 -spec get_all(Src, Dst, Reverse) -> [Binding] when
       Src :: rabbit_types:binding_source(),
@@ -469,10 +487,16 @@ get_all_in_mnesia(SrcName, DstName, Reverse) ->
     mnesia:async_dirty(Fun).
 
 get_all_in_khepri(SrcName, DstName) ->
-    MatchHead = #route{binding = #binding{source      = SrcName,
-                                          destination = DstName,
-                                          _           = '_'}},
-    [B || #route{binding = B} <- ets:match_object(rabbit_khepri_bindings, MatchHead)].
+    try
+        MatchHead = #route{binding = #binding{source      = SrcName,
+                                              destination = DstName,
+                                              _           = '_'}},
+        [B || #route{binding = B} <- ets:match_object(
+                                       ?KHEPRI_BINDINGS_PROJECTION, MatchHead)]
+    catch
+        error:badarg ->
+            []
+    end.
 
 %% -------------------------------------------------------------------
 %% get_all_for_source().
@@ -511,8 +535,14 @@ list_for_route(Route, true) ->
     end.
 
 get_all_for_source_in_khepri(Resource) ->
-    Route = #route{binding = #binding{source = Resource, _ = '_'}},
-    [B || #route{binding = B} <- ets:match_object(rabbit_khepri_bindings, Route)].
+    try
+        Route = #route{binding = #binding{source = Resource, _ = '_'}},
+        [B || #route{binding = B} <- ets:match_object(
+                                       ?KHEPRI_BINDINGS_PROJECTION, Route)]
+    catch
+        error:badarg ->
+            []
+    end.
 
 %% -------------------------------------------------------------------
 %% get_all_for_destination().
@@ -541,9 +571,15 @@ get_all_for_destination_in_mnesia(Dst) ->
     mnesia:async_dirty(Fun).
 
 get_all_for_destination_in_khepri(Destination) ->
-    Match = #route{binding = #binding{destination = Destination,
-                                      _           = '_'}},
-    [B || #route{binding = B} <- ets:match_object(rabbit_khepri_bindings, Match)].
+    try
+        Match = #route{binding = #binding{destination = Destination,
+                                          _           = '_'}},
+        [B || #route{binding = B} <- ets:match_object(
+                                       ?KHEPRI_BINDINGS_PROJECTION, Match)]
+    catch
+        error:badarg ->
+            []
+    end.
 
 %% -------------------------------------------------------------------
 %% fold().
@@ -617,11 +653,17 @@ match_in_mnesia(SrcName, Match) ->
                  Routes, Match(Binding)].
 
 match_in_khepri(SrcName, Match) ->
-    MatchHead = #route{binding = #binding{source      = SrcName,
-                                          _           = '_'}},
-    Routes = ets:select(rabbit_khepri_bindings, [{MatchHead, [], [['$_']]}]),
-    [Dest || [#route{binding = Binding = #binding{destination = Dest}}] <-
-                 Routes, Match(Binding)].
+    try
+        MatchHead = #route{binding = #binding{source      = SrcName,
+                                              _           = '_'}},
+        Routes = ets:select(
+                   ?KHEPRI_BINDINGS_PROJECTION, [{MatchHead, [], [['$_']]}]),
+        [Dest || [#route{binding = Binding = #binding{destination = Dest}}] <-
+                     Routes, Match(Binding)]
+    catch
+        error:badarg ->
+            []
+    end.
 
 %% Routing - HOT CODE PATH
 %% -------------------------------------------------------------------
@@ -655,17 +697,21 @@ match_routing_key_in_mnesia(SrcName, RoutingKeys, UseIndex) ->
     end.
 
 match_routing_key_in_khepri(Src, ['_']) ->
-    MatchHead = #index_route{source_key  = {Src, '_'},
-                             destination = '$1',
-                             _           = '_'},
-    ets:select(rabbit_khepri_index_route, [{MatchHead, [], ['$1']}]);
-
+    try
+        MatchHead = #index_route{source_key  = {Src, '_'},
+                                 destination = '$1',
+                                 _           = '_'},
+        ets:select(?KHEPRI_INDEX_ROUTE_PROJECTION, [{MatchHead, [], ['$1']}])
+    catch
+        error:badarg ->
+            []
+    end;
 match_routing_key_in_khepri(Src, RoutingKeys) ->
     lists:foldl(
       fun(RK, Acc) ->
               try
                   Dst = ets:lookup_element(
-                          rabbit_khepri_index_route,
+                          ?KHEPRI_INDEX_ROUTE_PROJECTION,
                           {Src, RK},
                           #index_route.destination),
                   Dst ++ Acc

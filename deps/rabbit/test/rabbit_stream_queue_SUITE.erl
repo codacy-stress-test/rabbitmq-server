@@ -239,27 +239,10 @@ init_per_group1(Group, Config) ->
         {skip, _} ->
             Ret;
         Config2 ->
-            EnableFF = rabbit_ct_broker_helpers:enable_feature_flag(
-                         Config2, stream_queue),
-            case EnableFF of
-                ok ->
-                    if Clustered ->
-                           rabbit_ct_broker_helpers:enable_feature_flag(
-                             Config2, stream_update_config_command);
-                       true ->
-                           ok
-                    end,
-                    ok = rabbit_ct_broker_helpers:rpc(
-                           Config2, 0, application, set_env,
-                           [rabbit, channel_tick_interval, 100]),
-                    Config2;
-                {skip, _} = Skip ->
-                    end_per_group(Group, Config2),
-                    Skip;
-                Other ->
-                    end_per_group(Group, Config2),
-                    {skip, Other}
-            end
+            ok = rabbit_ct_broker_helpers:rpc(
+                   Config2, 0, application, set_env,
+                   [rabbit, channel_tick_interval, 100]),
+            Config2
     end.
 
 end_per_group(_, Config) ->
@@ -1256,7 +1239,7 @@ recover_after_leader_and_coordinator_kill(Config) ->
 
 
     ct:pal("sys state ~p", [CState]),
-
+    rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]),
     ok.
 
 keep_consuming_on_leader_restart(Config) ->
@@ -1437,34 +1420,27 @@ tracking_status(Config) ->
     rabbit_ct_broker_helpers:rpc(Config, Server, ?MODULE, delete_testcase_queue, [Q]).
 
 restart_stream(Config) ->
-    case rabbit_ct_broker_helpers:enable_feature_flag(Config, restart_stream) of
-        ok ->
-            [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    [Server | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
 
-            Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
-            Q = ?config(queue_name, Config),
-            ?assertEqual({'queue.declare_ok', Q, 0, 0},
-                         declare(Config, Server, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0},
+                 declare(Config, Server, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
 
-            publish_confirm(Ch, Q, [<<"msg">>]),
-            Vhost = ?config(rmq_vhost, Config),
-            QName = #resource{virtual_host = Vhost,
-                              kind = queue,
-                              name = Q},
-            %% restart the stream
-            ?assertMatch({ok, _},
-                         rabbit_ct_broker_helpers:rpc(Config, Server,
-                                                      rabbit_stream_coordinator,
-                                                      ?FUNCTION_NAME, [QName])),
+    publish_confirm(Ch, Q, [<<"msg">>]),
+    Vhost = ?config(rmq_vhost, Config),
+    QName = #resource{virtual_host = Vhost,
+                      kind = queue,
+                      name = Q},
+    %% restart the stream
+    ?assertMatch({ok, _},
+                 rabbit_ct_broker_helpers:rpc(Config, Server,
+                                              rabbit_stream_coordinator,
+                                              ?FUNCTION_NAME, [QName])),
 
-            publish_confirm(Ch, Q, [<<"msg2">>]),
-            rabbit_ct_broker_helpers:rpc(Config, Server, ?MODULE, delete_testcase_queue, [Q]),
-            ok;
-        _ ->
-            ct:pal("skipping test ~s as feature flag `restart_stream` not supported",
-                   [?FUNCTION_NAME]),
-            ok
-    end.
+    publish_confirm(Ch, Q, [<<"msg2">>]),
+    rabbit_ct_broker_helpers:rpc(Config, Server, ?MODULE, delete_testcase_queue, [Q]),
+    ok.
 
 format(Config) ->
     %% tests rabbit_stream_queue:format/2
@@ -2218,6 +2194,7 @@ leader_locator_balanced_maintenance(Config) ->
       end, 60000),
 
     true = rabbit_ct_broker_helpers:unmark_as_being_drained(Config, Server3),
+    rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_queues, [[Q1, Q]]),
     rabbit_ct_broker_helpers:rpc(Config, 0, ?MODULE, delete_testcase_queue, [Q]).
 
 select_nodes_with_least_replicas(Config) ->
@@ -2817,18 +2794,7 @@ ensure_retention_applied(Config, Server) ->
     rabbit_ct_broker_helpers:rpc(Config, Server, gen_server, call, [osiris_retention, test]).
 
 rebalance(Config) ->
-    case rabbit_ct_broker_helpers:enable_feature_flag(Config, restart_stream) of
-        ok ->
-            rebalance0(Config);
-        _ ->
-            ct:pal("skipping test ~s as feature flag `restart_stream` not supported",
-                   [?FUNCTION_NAME]),
-            ok
-    end.
-
-rebalance0(Config) ->
-    [Server0 | _] =
-        rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    [Server0 | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
     Ch = rabbit_ct_client_helpers:open_channel(Config, Server0),
 
     Q1 = <<"st1">>,
@@ -2838,20 +2804,20 @@ rebalance0(Config) ->
     Q5 = <<"st5">>,
 
     ?assertEqual({'queue.declare_ok', Q1, 0, 0},
-                 declare(Ch, Q1, [{<<"x-queue-type">>, longstr, <<"stream">>},
-                                 {<<"x-initial-cluster-size">>, long, 3}])),
+                 declare(Config, Server0, Q1, [{<<"x-queue-type">>, longstr, <<"stream">>},
+                                               {<<"x-initial-cluster-size">>, long, 3}])),
     ?assertEqual({'queue.declare_ok', Q2, 0, 0},
-                 declare(Ch, Q2, [{<<"x-queue-type">>, longstr, <<"stream">>},
-                                 {<<"x-initial-cluster-size">>, long, 3}])),
+                 declare(Config, Server0, Q2, [{<<"x-queue-type">>, longstr, <<"stream">>},
+                                               {<<"x-initial-cluster-size">>, long, 3}])),
     ?assertEqual({'queue.declare_ok', Q3, 0, 0},
-                 declare(Ch, Q3, [{<<"x-queue-type">>, longstr, <<"stream">>},
-                                 {<<"x-initial-cluster-size">>, long, 3}])),
+                 declare(Config, Server0, Q3, [{<<"x-queue-type">>, longstr, <<"stream">>},
+                                               {<<"x-initial-cluster-size">>, long, 3}])),
     ?assertEqual({'queue.declare_ok', Q4, 0, 0},
-                 declare(Ch, Q4, [{<<"x-queue-type">>, longstr, <<"stream">>},
-                                 {<<"x-initial-cluster-size">>, long, 3}])),
+                 declare(Config, Server0, Q4, [{<<"x-queue-type">>, longstr, <<"stream">>},
+                                               {<<"x-initial-cluster-size">>, long, 3}])),
     ?assertEqual({'queue.declare_ok', Q5, 0, 0},
-                 declare(Ch, Q5, [{<<"x-queue-type">>, longstr, <<"stream">>},
-                                 {<<"x-initial-cluster-size">>, long, 3}])),
+                 declare(Config, Server0, Q5, [{<<"x-queue-type">>, longstr, <<"stream">>},
+                                               {<<"x-initial-cluster-size">>, long, 3}])),
 
     NumMsgs = 100,
     Data = crypto:strong_rand_bytes(100),

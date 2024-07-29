@@ -342,6 +342,7 @@ khepri:
 - khepri_export_erlang
 - khepri_import_export
 - khepri_machine
+- khepri_machine_v0
 - khepri_path
 - khepri_pattern_tree
 - khepri_payload
@@ -691,12 +692,6 @@ rabbit:
 - rabbit_queue_decorator
 - rabbit_queue_index
 - rabbit_queue_location
-- rabbit_queue_location_client_local
-- rabbit_queue_location_min_masters
-- rabbit_queue_location_random
-- rabbit_queue_location_validator
-- rabbit_queue_master_location_misc
-- rabbit_queue_master_locator
 - rabbit_queue_type
 - rabbit_queue_type_util
 - rabbit_quorum_memory_manager
@@ -1018,14 +1013,9 @@ rabbitmq_management_agent:
 - rabbit_mgmt_metrics_gc
 - rabbit_mgmt_storage
 rabbitmq_mqtt:
-- Elixir.RabbitMQ.CLI.Ctl.Commands.DecommissionMqttNodeCommand
 - Elixir.RabbitMQ.CLI.Ctl.Commands.ListMqttConnectionsCommand
 - mc_mqtt
-- mqtt_machine
-- mqtt_machine_v0
-- mqtt_node
 - rabbit_mqtt
-- rabbit_mqtt_collector
 - rabbit_mqtt_confirms
 - rabbit_mqtt_ff
 - rabbit_mqtt_internal_event_handler

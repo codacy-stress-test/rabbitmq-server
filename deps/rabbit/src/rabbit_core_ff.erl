@@ -101,7 +101,7 @@
    {restart_streams,
     #{desc          => "Support for restarting streams with optional preferred next leader argument."
       "Used to implement stream leader rebalancing",
-      stability     => stable,
+      stability     => required,
       depends_on    => [stream_queue]
      }}).
 
@@ -109,14 +109,14 @@
    {stream_sac_coordinator_unblock_group,
     #{desc          => "Bug fix to unblock a group of consumers in a super stream partition",
       doc_url       => "https://github.com/rabbitmq/rabbitmq-server/issues/7743",
-      stability     => stable,
+      stability     => required,
       depends_on    => [stream_single_active_consumer]
      }}).
 
 -rabbit_feature_flag(
    {stream_filtering,
     #{desc          => "Support for stream filtering.",
-      stability     => stable,
+      stability     => required,
       depends_on    => [stream_queue]
      }}).
 
@@ -153,7 +153,7 @@
    {stream_update_config_command,
     #{desc          => "A new internal command that is used to update streams as "
                         "part of a policy.",
-      stability     => stable,
+      stability     => required,
       depends_on    => [stream_queue]
      }}).
 
@@ -184,4 +184,11 @@
       doc_url       => "https://github.com/rabbitmq/rabbitmq-server/issues/11159",
       stability     => stable,
       depends_on    => [message_containers]
+     }}).
+
+-rabbit_feature_flag(
+   {classic_queue_leader_locator,
+    #{desc          => "queue-leader-locator support in classic queues",
+      doc_url       => "https://www.rabbitmq.com/docs/clustering#replica-placement",
+      stability     => stable
      }}).

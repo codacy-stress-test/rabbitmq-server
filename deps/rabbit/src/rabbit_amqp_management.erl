@@ -147,8 +147,8 @@ handle_http_req(HttpMethod = <<"PUT">>,
             Result;
         {error, not_found} ->
             PermCache2 = check_dead_letter_exchange(QName, QArgs, User, PermCache1),
-            case rabbit_amqqueue:declare(
-                   QName, Durable, AutoDelete, QArgs, Owner, Username) of
+            try rabbit_amqqueue:declare(
+                  QName, Durable, AutoDelete, QArgs, Owner, Username) of
                 {new, Q} ->
                     rabbit_core_metrics:queue_created(QName),
                     {Q, 0, 0, <<"201">>, PermCache2};
@@ -169,6 +169,11 @@ handle_http_req(HttpMethod = <<"PUT">>,
                           ReasonArgs);
                 {protocol_error, _ErrorType, Reason, ReasonArgs} ->
                     throw(<<"400">>, Reason, ReasonArgs)
+            catch exit:#amqp_error{name = precondition_failed,
+                                   explanation = Expl} ->
+                      throw(<<"409">>, Expl, []);
+                  exit:#amqp_error{explanation = Expl} ->
+                      throw(<<"400">>, Expl, [])
             end;
         {error, {absent, Q, Reason}} ->
             absent(Q, Reason)
@@ -205,9 +210,18 @@ handle_http_req(<<"PUT">>,
             {error, not_found} ->
                 ok = prohibit_cr_lf(XNameBin),
                 ok = prohibit_reserved_amq(XName),
-                rabbit_exchange:declare(
-                  XName, XTypeAtom, Durable, AutoDelete,
-                  Internal, XArgs, Username)
+                case rabbit_exchange:declare(
+                       XName, XTypeAtom, Durable, AutoDelete,
+                       Internal, XArgs, Username) of
+                    {ok, DeclaredX} ->
+                        DeclaredX;
+                    {error, timeout} ->
+                        throw(
+                          <<"503">>,
+                          "Could not create ~ts because the operation "
+                          "timed out",
+                          [rabbit_misc:rs(XName)])
+                end
         end,
     try rabbit_exchange:assert_equivalence(
           X, XTypeAtom, Durable, AutoDelete, Internal, XArgs) of
@@ -280,8 +294,15 @@ handle_http_req(<<"DELETE">>,
     ok = prohibit_default_exchange(XName),
     ok = prohibit_reserved_amq(XName),
     PermCache = check_resource_access(XName, configure, User, PermCache0),
-    _ = rabbit_exchange:delete(XName, false, Username),
-    {<<"204">>, null, {PermCache, TopicPermCache}};
+    case rabbit_exchange:ensure_deleted(XName, false, Username) of
+        ok ->
+            {<<"204">>, null, {PermCache, TopicPermCache}};
+        {error, timeout} ->
+            throw(
+              <<"503">>,
+              "failed to delete ~ts due to a timeout",
+              [rabbit_misc:rs(XName)])
+    end;
 
 handle_http_req(<<"POST">>,
                 [<<"bindings">>],

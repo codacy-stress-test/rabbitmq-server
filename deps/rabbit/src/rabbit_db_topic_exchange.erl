@@ -26,6 +26,7 @@
 -define(MNESIA_NODE_TABLE, rabbit_topic_trie_node).
 -define(MNESIA_EDGE_TABLE, rabbit_topic_trie_edge).
 -define(MNESIA_BINDING_TABLE, rabbit_topic_trie_binding).
+-define(KHEPRI_PROJECTION, rabbit_khepri_topic_trie).
 
 -type match_result() :: [rabbit_types:binding_destination() |
                          {rabbit_amqqueue:name(), rabbit_types:binding_key()}].
@@ -491,7 +492,12 @@ ensure_topic_deletion_ets() ->
 %% Khepri topic graph
 
 trie_match_in_khepri(X, Words, BKeys) ->
-    trie_match_in_khepri(X, root, Words, BKeys, []).
+    try
+        trie_match_in_khepri(X, root, Words, BKeys, [])
+    catch
+        error:badarg ->
+            []
+    end.
 
 trie_match_in_khepri(X, Node, [], BKeys, ResAcc0) ->
     Destinations = trie_bindings_in_khepri(X, Node, BKeys),
@@ -522,19 +528,21 @@ trie_match_skip_any_in_khepri(X, Node, [_ | RestW] = Words, BKeys, ResAcc) ->
       trie_match_in_khepri(X, Node, Words, BKeys, ResAcc)).
 
 trie_child_in_khepri(X, Node, Word) ->
-    case ets:lookup(rabbit_khepri_topic_trie,
-                    #trie_edge{exchange_name = X,
-                               node_id       = Node,
-                               word          = Word}) of
+    case ets:lookup(
+           ?KHEPRI_PROJECTION,
+           #trie_edge{exchange_name = X,
+                      node_id       = Node,
+                      word          = Word}) of
         [#topic_trie_edge{node_id = NextNode}] -> {ok, NextNode};
         []                                     -> error
     end.
 
 trie_bindings_in_khepri(X, Node, BKeys) ->
-    case ets:lookup(rabbit_khepri_topic_trie,
-                    #trie_edge{exchange_name = X,
-                               node_id       = Node,
-                               word          = bindings}) of
+    case ets:lookup(
+           ?KHEPRI_PROJECTION,
+           #trie_edge{exchange_name = X,
+                      node_id       = Node,
+                      word          = bindings}) of
         [#topic_trie_edge{node_id = {bindings, Bindings}}] ->
             [case BKeys of
                  true ->
