@@ -93,7 +93,7 @@ eunit(
 
 broker_for_integration_suites(
     extra_plugins = [
-        "//deps/rabbitmq_mqtt:erlang_app",
+        "//deps/rabbitmq_web_mqtt:erlang_app",
     ],
 )
 
@@ -151,6 +151,7 @@ rabbitmq_integration_suite(
     ],
     runtime_deps = [
         "//deps/oauth2_client:erlang_app",
+        "//deps/rabbitmq_amqp_client:erlang_app",
         "@emqtt//:erlang_app",
     ],
 )
