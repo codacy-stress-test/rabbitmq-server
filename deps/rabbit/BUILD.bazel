@@ -58,8 +58,6 @@ _APP_ENV = """[
 	    {default_user_tags, [administrator]},
 	    {default_vhost, <<"/">>},
 	    {default_permissions, [<<".*">>, <<".*">>, <<".*">>]},
-	    {amqp1_0_default_user, <<"guest">>},
-	    {amqp1_0_default_vhost, <<"/">>},
 	    {loopback_users, [<<"guest">>]},
 	    {password_hashing_module, rabbit_password_hashing_sha256},
 	    {server_properties, []},
@@ -67,7 +65,9 @@ _APP_ENV = """[
 	    {collect_statistics_interval, 5000},
 	    {mnesia_table_loading_retry_timeout, 30000},
 	    {mnesia_table_loading_retry_limit, 10},
-	    {auth_mechanisms, ['PLAIN', 'AMQPLAIN']},
+	    {anonymous_login_user, <<"guest">>},
+	    {anonymous_login_pass, <<"guest">>},
+	    {auth_mechanisms, ['PLAIN', 'AMQPLAIN', 'ANONYMOUS']},
 	    {auth_backends, [rabbit_auth_backend_internal]},
 	    {delegate_count, 16},
 	    {trace_vhosts, []},
@@ -705,8 +705,12 @@ rabbitmq_suite(
 rabbitmq_suite(
     name = "rabbit_fifo_int_SUITE",
     size = "medium",
+    additional_beam = [
+        ":test_test_util_beam",
+    ],
     deps = [
         "//deps/rabbit_common:erlang_app",
+        "//deps/rabbitmq_ct_helpers:erlang_app",
         "@aten//:erlang_app",
         "@gen_batch_server//:erlang_app",
         "@meck//:erlang_app",
@@ -722,6 +726,7 @@ rabbitmq_suite(
     ],
     deps = [
         "//deps/rabbit_common:erlang_app",
+        "@meck//:erlang_app",
         "@proper//:erlang_app",
         "@ra//:erlang_app",
     ],
@@ -732,6 +737,15 @@ rabbitmq_suite(
     size = "small",
     deps = [
         "//deps/rabbit_common:erlang_app",
+    ],
+)
+
+rabbitmq_suite(
+    name = "rabbit_fifo_q_SUITE",
+    size = "small",
+    deps = [
+        "//deps/rabbit_common:erlang_app",
+        "@proper//:erlang_app",
     ],
 )
 
@@ -1192,6 +1206,14 @@ rabbitmq_integration_suite(
     size = "medium",
     additional_beam = [
         ":test_clustering_utils_beam",
+    ],
+)
+
+rabbitmq_integration_suite(
+    name = "cluster_upgrade_SUITE",
+    size = "medium",
+    additional_beam = [
+        ":test_queue_utils_beam",
     ],
 )
 

@@ -170,7 +170,8 @@
     test_writer/1,
     user/1,
 
-    configured_metadata_store/1
+    configured_metadata_store/1,
+    await_metadata_store_consistent/2
   ]).
 
 %% Internal functions exported to be used by rpc:call/4.
@@ -628,7 +629,14 @@ do_start_rabbitmq_node(Config, NodeConfig, I) ->
         true  -> lists:nth(I + 1, WithPlugins0);
         false -> WithPlugins0
     end,
-    CanUseSecondary = (I + 1) rem 2 =:= 0,
+    ForceUseSecondary = rabbit_ct_helpers:get_config(
+                          Config, force_secondary_umbrella, undefined),
+    CanUseSecondary = case ForceUseSecondary of
+                          undefined ->
+                              (I + 1) rem 2 =:= 0;
+                          Override when is_boolean(Override) ->
+                              Override
+                      end,
     UseSecondaryUmbrella = case ?config(secondary_umbrella, Config) of
                                false -> false;
                                _     -> CanUseSecondary
@@ -989,6 +997,30 @@ enable_khepri_metadata_store(Config, FFs0) ->
                                 Skip
                         end
                 end, Config, FFs).
+
+%% Waits until the metadata store replica on Node is up to date with the leader.
+await_metadata_store_consistent(Config, Node) ->
+    case configured_metadata_store(Config) of
+        mnesia ->
+            ok;
+        {khepri, _} ->
+            RaClusterName = rabbit_khepri:get_ra_cluster_name(),
+            Leader = rpc(Config, Node, ra_leaderboard, lookup_leader, [RaClusterName]),
+            LastAppliedLeader = ra_last_applied(Leader),
+
+            NodeName = get_node_config(Config, Node, nodename),
+            ServerId = {RaClusterName, NodeName},
+            rabbit_ct_helpers:eventually(
+              ?_assert(
+                 begin
+                     LastApplied = ra_last_applied(ServerId),
+                     is_integer(LastApplied) andalso LastApplied >= LastAppliedLeader
+                 end))
+    end.
+
+ra_last_applied(ServerId) ->
+    #{last_applied := LastApplied} = ra:key_metrics(ServerId),
+    LastApplied.
 
 rewrite_node_config_file(Config, Node) ->
     NodeConfig = get_node_config(Config, Node),

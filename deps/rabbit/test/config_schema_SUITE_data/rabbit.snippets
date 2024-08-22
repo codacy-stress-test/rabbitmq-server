@@ -182,7 +182,7 @@ ssl_options.fail_if_no_peer_cert = true",
   [{rabbit, [{default_users, [
       {<<"a">>, [{<<"vhost_pattern">>, "banana"},
                  {<<"tags">>, [administrator, operator]},
-                 {<<"password">>, "SECRET"},
+                 {<<"password">>, <<"SECRET">>},
                  {<<"read">>, ".*"}]}]}]}],
   []},
 
@@ -220,6 +220,8 @@ ssl_options.fail_if_no_peer_cert = true",
  {default_user_settings,
   "default_user = guest
 default_pass = guest
+anonymous_login_user = guest
+anonymous_login_pass = guest
 default_user_tags.administrator = true
 default_permissions.configure = .*
 default_permissions.read = .*
@@ -227,9 +229,30 @@ default_permissions.write = .*",
   [{rabbit,
        [{default_user,<<"guest">>},
         {default_pass,<<"guest">>},
+        {anonymous_login_user,<<"guest">>},
+        {anonymous_login_pass,<<"guest">>},
         {default_user_tags,[administrator]},
         {default_permissions,[<<".*">>,<<".*">>,<<".*">>]}]}],
   []},
+ {anonymous_login_user,
+  "anonymous_login_user = none",
+  [{rabbit,
+       [{anonymous_login_user, none}]}],
+  []},
+
+ {auth_mechanisms_ordered,
+  "auth_mechanisms.1 = PLAIN
+auth_mechanisms.2 = AMQPLAIN
+auth_mechanisms.3 = ANONYMOUS",
+  [],
+  [{rabbit,
+    %% We expect the mechanisms in the order as declared.
+    [{auth_mechanisms, ['PLAIN', 'AMQPLAIN', 'ANONYMOUS']}]
+   }],
+  [],
+  nosort
+ },
+
  {cluster_formation,
   "cluster_formation.peer_discovery_backend = rabbit_peer_discovery_classic_config
 cluster_formation.classic_config.nodes.peer1 = rabbit@hostname1
@@ -510,7 +533,7 @@ tcp_listen_options.exit_on_close = false",
             [{cacertfile,"test/config_schema_SUITE_data/certs/cacert.pem"},
              {certfile,"test/config_schema_SUITE_data/certs/cert.pem"},
              {keyfile,"test/config_schema_SUITE_data/certs/key.pem"},
-             {password,"t0p$3kRe7"}]}]}],
+             {password,<<"t0p$3kRe7">>}]}]}],
   []},
  {ssl_options_tls_ver_old,
   "listeners.ssl.1 = 5671
@@ -745,22 +768,6 @@ tcp_listen_options.exit_on_close = false",
  {tcp_listen_options_linger_timeout,
   "tcp_listen_options.linger.timeout = 100",
   [{rabbit,[{tcp_listen_options,[{linger,{false,100}}]}]}],
-  []},
-
- {cluster_formation_randomized_startup_delay_both_values,
-  "cluster_formation.randomized_startup_delay_range.min = 10
-   cluster_formation.randomized_startup_delay_range.max = 30",
-  [],
-  []},
-
- {cluster_formation_randomized_startup_delay_min_only,
-  "cluster_formation.randomized_startup_delay_range.min = 10",
-  [],
-  []},
-
- {cluster_formation_randomized_startup_delay_max_only,
-  "cluster_formation.randomized_startup_delay_range.max = 30",
-  [],
   []},
 
  {cluster_formation_internal_lock_retries,

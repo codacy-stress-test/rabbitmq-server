@@ -70,6 +70,7 @@
 -export([queue/1, queue_names/1]).
 
 -export([kill_queue/2, kill_queue/3, kill_queue_hard/2, kill_queue_hard/3]).
+-export([delete_transient_queues_on_node/1]).
 
 %% internal
 -export([internal_declare/2, internal_delete/2, run_backing_queue/3,
@@ -251,22 +252,30 @@ get_queue_type(Args, DefaultQueueType) ->
             rabbit_queue_type:discover(V)
     end.
 
--spec internal_declare(amqqueue:amqqueue(), boolean()) ->
-    {created | existing, amqqueue:amqqueue()} | queue_absent().
+-spec internal_declare(Queue, Recover) -> Ret when
+      Queue :: amqqueue:amqqueue(),
+      Recover :: boolean(),
+      Ret :: {created | existing, amqqueue:amqqueue()} |
+             queue_absent() |
+             rabbit_khepri:timeout_error().
 
 internal_declare(Q, Recover) ->
     do_internal_declare(Q, Recover).
 
 do_internal_declare(Q0, true) ->
-    %% TODO Why do we return the old state instead of the actual one?
-    %% I'm leaving it like it was before the khepri refactor, because
-    %% rabbit_amqqueue_process:init_it2 compares the result of this declare to decide
-    %% if continue or stop. If we return the actual one, it fails and the queue stops
-    %% silently during init.
-    %% Maybe we should review this bit of code at some point.
     Q = amqqueue:set_state(Q0, live),
-    ok = store_queue(Q),
-    {created, Q0};
+    case store_queue(Q) of
+        ok ->
+            %% TODO Why do we return the old state instead of the actual one?
+            %% I'm leaving it like it was before the khepri refactor, because
+            %% rabbit_amqqueue_process:init_it2 compares the result of this
+            %% declare to decide if continue or stop. If we return the actual
+            %% one, it fails and the queue stops silently during init.
+            %% Maybe we should review this bit of code at some point.
+            {created, Q0};
+        {error, timeout} = Err ->
+            Err
+    end;
 do_internal_declare(Q0, false) ->
     Q = rabbit_policy:set(amqqueue:set_state(Q0, live)),
     Queue = rabbit_queue_decorator:set(Q),
@@ -279,12 +288,18 @@ do_internal_declare(Q0, false) ->
 update(Name, Fun) ->
     rabbit_db_queue:update(Name, Fun).
 
-%% only really used for quorum queues to ensure the rabbit_queue record
+-spec ensure_rabbit_queue_record_is_initialized(Queue) -> Ret when
+      Queue :: amqqueue:amqqueue(),
+      Ret :: ok | {error, timeout}.
+
+%% only really used for stream queues to ensure the rabbit_queue record
 %% is initialised
 ensure_rabbit_queue_record_is_initialized(Q) ->
     store_queue(Q).
 
--spec store_queue(amqqueue:amqqueue()) -> 'ok'.
+-spec store_queue(Queue) -> Ret when
+      Queue :: amqqueue:amqqueue(),
+      Ret :: ok | {error, timeout}.
 
 store_queue(Q0) ->
     Q = rabbit_queue_decorator:set(Q0),
@@ -324,12 +339,10 @@ is_server_named_allowed(Args) ->
     Type = get_queue_type(Args),
     rabbit_queue_type:is_server_named_allowed(Type).
 
--spec lookup
-        (name()) ->
-            rabbit_types:ok(amqqueue:amqqueue()) |
-            rabbit_types:error('not_found');
-        ([name()]) ->
-            [amqqueue:amqqueue()].
+-spec lookup(QueueName) -> Ret when
+      QueueName :: name(),
+      Ret :: rabbit_types:ok(amqqueue:amqqueue())
+             | rabbit_types:error('not_found').
 
 lookup(Name) when is_record(Name, resource) ->
     rabbit_db_queue:get(Name).
@@ -1247,8 +1260,8 @@ list_local_followers() ->
     [Q
       || Q <- list(),
          amqqueue:is_quorum(Q),
-         amqqueue:get_state(Q) =/= crashed,
          amqqueue:get_leader(Q) =/= node(),
+         lists:member(node(), get_quorum_nodes(Q)),
          rabbit_quorum_queue:is_recoverable(Q)
          ].
 
@@ -1839,13 +1852,39 @@ on_node_up(_Node) ->
 -spec on_node_down(node()) -> 'ok'.
 
 on_node_down(Node) ->
+    case delete_transient_queues_on_node(Node) of
+        ok ->
+            ok;
+        {error, timeout} ->
+            %% This case is possible when running Khepri. The node going down
+            %% could leave the cluster in a minority so the command to delete
+            %% the transient queue records would fail. Also see
+            %% `rabbit_khepri:init/0': we also try this deletion when the node
+            %% restarts - a time that the cluster is very likely to have a
+            %% majority - to ensure these records are deleted.
+            rabbit_log:warning("transient queues for node '~ts' could not be "
+                               "deleted because of a timeout. These queues "
+                               "will be removed when node '~ts' restarts or "
+                               "is removed from the cluster.", [Node, Node]),
+            ok
+    end.
+
+-spec delete_transient_queues_on_node(Node) -> Ret when
+      Node :: node(),
+      Ret :: ok | rabbit_khepri:timeout_error().
+
+delete_transient_queues_on_node(Node) ->
     {Time, Ret} = timer:tc(fun() -> rabbit_db_queue:delete_transient(filter_transient_queues_to_delete(Node)) end),
     case Ret of
-        ok -> ok;
-        {QueueNames, Deletions} ->
+        ok ->
+            ok;
+        {error, timeout} = Err ->
+            Err;
+        {QueueNames, Deletions} when is_list(QueueNames) ->
             case length(QueueNames) of
                 0 -> ok;
-                N -> rabbit_log:info("~b transient queues from an old incarnation of node ~tp deleted in ~fs",
+                N -> rabbit_log:info("~b transient queues from node '~ts' "
+                                     "deleted in ~fs",
                                      [N, Node, Time / 1_000_000])
             end,
             notify_queue_binding_deletions(Deletions),

@@ -62,6 +62,7 @@ dep_rabbitmq_dotnet_client            = git_rmq           rabbitmq-dotnet-client
 dep_rabbitmq_event_exchange           = git_rmq-subfolder rabbitmq-event-exchange $(current_rmq_ref) $(base_rmq_ref) main
 dep_rabbitmq_federation               = git_rmq-subfolder rabbitmq-federation $(current_rmq_ref) $(base_rmq_ref) main
 dep_rabbitmq_federation_management    = git_rmq-subfolder rabbitmq-federation-management $(current_rmq_ref) $(base_rmq_ref) main
+dep_rabbitmq_federation_prometheus    = git_rmq-subfolder rabbitmq-federation-prometheus $(current_rmq_ref) $(base_rmq_ref) main
 dep_rabbitmq_java_client              = git_rmq           rabbitmq-java-client $(current_rmq_ref) $(base_rmq_ref) main
 dep_rabbitmq_jms_client               = git_rmq           rabbitmq-jms-client $(current_rmq_ref) $(base_rmq_ref) main
 dep_rabbitmq_jms_cts                  = git_rmq           rabbitmq-jms-cts $(current_rmq_ref) $(base_rmq_ref) main
@@ -89,6 +90,7 @@ dep_rabbitmq_rtopic_exchange          = git_rmq           rabbitmq-rtopic-exchan
 dep_rabbitmq_sharding                 = git_rmq-subfolder rabbitmq-sharding $(current_rmq_ref) $(base_rmq_ref) main
 dep_rabbitmq_shovel                   = git_rmq-subfolder rabbitmq-shovel $(current_rmq_ref) $(base_rmq_ref) main
 dep_rabbitmq_shovel_management        = git_rmq-subfolder rabbitmq-shovel-management $(current_rmq_ref) $(base_rmq_ref) main
+dep_rabbitmq_shovel_prometheus        = git_rmq-subfolder rabbitmq-shovel-prometheus $(current_rmq_ref) $(base_rmq_ref) main
 dep_rabbitmq_stomp                    = git_rmq-subfolder rabbitmq-stomp $(current_rmq_ref) $(base_rmq_ref) main
 dep_rabbitmq_stream                   = git_rmq-subfolder rabbitmq-stream $(current_rmq_ref) $(base_rmq_ref) main
 dep_rabbitmq_stream_common            = git_rmq-subfolder rabbitmq-stream-common $(current_rmq_ref) $(base_rmq_ref) main
@@ -115,18 +117,18 @@ dep_accept = hex 0.3.5
 dep_cowboy = hex 2.12.0
 dep_cowlib = hex 2.13.0
 dep_credentials_obfuscation = hex 3.4.0
-dep_cuttlefish = hex 3.1.0
+dep_cuttlefish = hex 3.4.0
 dep_gen_batch_server = hex 0.8.8
 dep_jose = hex 1.11.10
 dep_khepri = hex 0.14.0
 dep_khepri_mnesia_migration = hex 0.5.0
 dep_prometheus = hex 4.11.0
-dep_ra = hex 2.13.5
+dep_ra = hex 2.13.6
 dep_ranch = hex 2.1.0
 dep_recon = hex 2.5.3
 dep_redbug = hex 2.0.7
 dep_thoas = hex 1.0.0
-dep_observer_cli = hex 1.7.3
+dep_observer_cli = hex 1.7.5
 dep_seshat = git https://github.com/rabbitmq/seshat v0.6.1
 dep_stdout_formatter = hex 0.2.4
 dep_sysmon_handler = hex 1.3.0
@@ -156,6 +158,7 @@ RABBITMQ_COMPONENTS = amqp_client \
 		      rabbitmq_event_exchange \
 		      rabbitmq_federation \
 		      rabbitmq_federation_management \
+		      rabbitmq_federation_prometheus \
 		      rabbitmq_java_client \
 		      rabbitmq_jms_client \
 		      rabbitmq_jms_cts \
@@ -183,6 +186,7 @@ RABBITMQ_COMPONENTS = amqp_client \
 		      rabbitmq_sharding \
 		      rabbitmq_shovel \
 		      rabbitmq_shovel_management \
+		      rabbitmq_shovel_prometheus \
 		      rabbitmq_stomp \
 		      rabbitmq_stream \
 		      rabbitmq_stream_common \
