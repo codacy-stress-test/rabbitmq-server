@@ -91,6 +91,8 @@ cluster_size_1_tests() ->
      ,block_only_publisher
      ,many_qos1_messages
      ,session_expiry
+     ,cli_close_all_connections
+     ,cli_close_all_user_connections
      ,management_plugin_connection
      ,management_plugin_enable
      ,disconnect
@@ -1165,6 +1167,24 @@ rabbit_mqtt_qos0_queue_kill_node(Config) ->
     ok = rabbit_ct_broker_helpers:start_node(Config, 1),
     ?assertEqual([], rpc(Config, rabbit_db_binding, get_all, [])).
 
+cli_close_all_connections(Config) ->
+    ClientId = atom_to_binary(?FUNCTION_NAME),
+    C = connect(ClientId, Config),
+    process_flag(trap_exit, true),
+    {ok, String} = rabbit_ct_broker_helpers:rabbitmqctl(
+                     Config, 0, ["close_all_connections", "bye"]),
+    ?assertEqual(match, re:run(String, "Closing .* reason: bye", [{capture, none}])),
+    ok = await_exit(C).
+
+cli_close_all_user_connections(Config) ->
+    ClientId = atom_to_binary(?FUNCTION_NAME),
+    C = connect(ClientId, Config),
+    process_flag(trap_exit, true),
+    {ok, String} = rabbit_ct_broker_helpers:rabbitmqctl(
+                     Config, 0, ["close_all_user_connections","guest", "bye"]),
+    ?assertEqual(match, re:run(String, "Closing .* reason: bye", [{capture, none}])),
+    ok = await_exit(C).
+
 %% Test that MQTT connection can be listed and closed via the rabbitmq_management plugin.
 management_plugin_connection(Config) ->
     KeepaliveSecs = 99,
@@ -1397,7 +1417,7 @@ block(Config) ->
     puback_timeout = publish_qos1_timeout(C, Topic, <<"Still blocked">>, 1000),
 
     %% Unblock
-    rpc(Config, vm_memory_monitor, set_vm_memory_high_watermark, [0.4]),
+    rpc(Config, vm_memory_monitor, set_vm_memory_high_watermark, [0.6]),
     ok = expect_publishes(C, Topic, [<<"Not blocked yet">>,
                                      <<"Now blocked">>,
                                      <<"Still blocked">>]),
@@ -1438,7 +1458,7 @@ block_only_publisher(Config) ->
     ?assertEqual(puback_timeout, publish_qos1_timeout(Con, Topic, <<"from Con 2">>, 500)),
     ?assertEqual(pong, emqtt:ping(Sub)),
 
-    rpc(Config, vm_memory_monitor, set_vm_memory_high_watermark, [0.4]),
+    rpc(Config, vm_memory_monitor, set_vm_memory_high_watermark, [0.6]),
     %% Let it unblock
     timer:sleep(100),
 
