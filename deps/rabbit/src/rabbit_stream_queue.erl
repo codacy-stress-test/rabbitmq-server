@@ -92,7 +92,8 @@
                         leader :: pid(),
                         local_pid :: undefined | pid(),
                         next_seq = 1 :: non_neg_integer(),
-                        correlation = #{} :: #{appender_seq() => {rabbit_queue_type:correlation(), msg()}},
+                        correlation = #{} :: #{appender_seq() =>
+                                               {rabbit_queue_type:correlation(), msg()}},
                         soft_limit :: non_neg_integer(),
                         slow = false :: boolean(),
                         readers = #{} :: #{rabbit_types:ctag() => #stream{}},
@@ -521,7 +522,7 @@ deliver(QSs, Msg, Options) ->
               {[{Q, S} | Qs], Actions}
       end, {[], []}, QSs).
 
-deliver0(MsgId, Msg,
+deliver0(Corr, Msg,
          #stream_client{name = Name,
                         leader = LeaderPid,
                         writer_id = WriterId,
@@ -531,11 +532,11 @@ deliver0(MsgId, Msg,
                         slow = Slow0} = State,
          Actions0) ->
     ok = osiris:write(LeaderPid, WriterId, Seq, stream_message(Msg)),
-    Correlation = case MsgId of
+    Correlation = case Corr of
                       undefined ->
                           Correlation0;
                       _ ->
-                          Correlation0#{Seq => {MsgId, Msg}}
+                          Correlation0#{Seq => {Corr, Msg}}
                   end,
     {Slow, Actions} = case maps:size(Correlation) >= SftLmt of
                           true when not Slow0 ->
@@ -626,7 +627,9 @@ handle_event(_QName, {stream_local_member_change, Pid},
                          end, #{}, Readers0),
     {ok, State#stream_client{local_pid = Pid, readers = Readers1}, []};
 handle_event(_QName, eol, #stream_client{name = Name}) ->
-    {eol, [{unblock, Name}]}.
+    {eol, [{unblock, Name}]};
+handle_event(QName, deleted_replica, State) ->
+    {ok, State, [{queue_down, QName}]}.
 
 is_recoverable(Q) ->
     Node = node(),
@@ -1291,7 +1294,7 @@ notify_decorators(Q) when ?is_amqqueue(Q) ->
 resend_all(#stream_client{leader = LeaderPid,
                           writer_id = WriterId,
                           correlation = Corrs} = State) ->
-    Msgs = lists:sort(maps:values(Corrs)),
+    Msgs = lists:sort(maps:to_list(Corrs)),
     case Msgs of
         [] -> ok;
         [{Seq, _} | _] ->
@@ -1300,7 +1303,7 @@ resend_all(#stream_client{leader = LeaderPid,
     end,
     [begin
          ok = osiris:write(LeaderPid, WriterId, Seq, stream_message(Msg))
-     end || {Seq, Msg} <- Msgs],
+     end || {Seq, {_Corr, Msg}} <- Msgs],
     State.
 
 -spec set_leader_pid(Pid, QName) -> Ret when

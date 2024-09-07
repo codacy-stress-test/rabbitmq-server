@@ -525,6 +525,7 @@ def all_srcs(name = "all_srcs"):
             "include/amqqueue.hrl",
             "include/amqqueue_v2.hrl",
             "include/internal_user.hrl",
+            "include/khepri.hrl",
             "include/mc.hrl",
             "include/rabbit_amqp.hrl",
             "include/rabbit_global_counters.hrl",
@@ -1982,7 +1983,7 @@ def test_suite_beam_files(name = "test_suite_beam_files"):
         outs = ["test/metadata_store_clustering_SUITE.beam"],
         app_name = "rabbit",
         erlc_opts = "//:test_erlc_opts",
-        deps = ["//deps/amqp_client:erlang_app"],
+        deps = ["//deps/amqp_client:erlang_app", "//deps/rabbitmq_ct_helpers:erlang_app"],
     )
     erlang_bytecode(
         name = "metadata_store_migration_SUITE_beam_files",
@@ -2173,4 +2174,12 @@ def test_suite_beam_files(name = "test_suite_beam_files"):
         app_name = "rabbit",
         erlc_opts = "//:test_erlc_opts",
         deps = ["//deps/amqp_client:erlang_app"],
+    )
+    erlang_bytecode(
+        name = "test_rabbit_ct_hook_beam",
+        testonly = True,
+        srcs = ["test/rabbit_ct_hook.erl"],
+        outs = ["test/rabbit_ct_hook.beam"],
+        app_name = "rabbit",
+        erlc_opts = "//:test_erlc_opts",
     )
