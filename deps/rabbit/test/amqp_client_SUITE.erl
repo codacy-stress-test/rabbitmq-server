@@ -110,7 +110,6 @@ groups() ->
        idle_time_out_on_server,
        idle_time_out_on_client,
        idle_time_out_too_short,
-       rabbit_status_connection_count,
        handshake_timeout,
        credential_expires,
        attach_to_exclusive_queue,
@@ -1663,18 +1662,19 @@ events(Config) ->
 
     Protocol = {protocol, {1, 0}},
     AuthProps = [{name, <<"guest">>},
-                       {auth_mechanism, <<"PLAIN">>},
-                       {ssl, false},
-                       Protocol],
+                 {auth_mechanism, <<"PLAIN">>},
+                 {ssl, false},
+                 Protocol],
     ?assertMatch(
-      {value, _},
-      find_event(user_authentication_success, AuthProps, Events)),
+       {value, _},
+       find_event(user_authentication_success, AuthProps, Events)),
 
     Node = get_node_config(Config, 0, nodename),
     ConnectionCreatedProps = [Protocol,
                               {node, Node},
                               {vhost, <<"/">>},
                               {user, <<"guest">>},
+                              {container_id, <<"my container">>},
                               {type, network}],
     {value, ConnectionCreatedEvent} = find_event(
                                         connection_created,
@@ -1695,8 +1695,8 @@ events(Config) ->
                              Pid,
                              ClientProperties],
     ?assertMatch(
-      {value, _},
-      find_event(connection_closed, ConnectionClosedProps, Events)),
+       {value, _},
+       find_event(connection_closed, ConnectionClosedProps, Events)),
     ok.
 
 sync_get_unsettled_classic_queue(Config) ->
@@ -3697,8 +3697,12 @@ list_connections(Config) ->
     [ok = rabbit_ct_client_helpers:close_channels_and_connection(Config, Node) || Node <- [0, 1, 2]],
 
     Connection091 = rabbit_ct_client_helpers:open_unmanaged_connection(Config, 0),
-    {ok, C0} = amqp10_client:open_connection(connection_config(0, Config)),
-    {ok, C2} = amqp10_client:open_connection(connection_config(2, Config)),
+    ContainerId0 = <<"ID 0">>,
+    ContainerId2 = <<"ID 2">>,
+    Cfg0 = maps:put(container_id, ContainerId0, connection_config(0, Config)),
+    Cfg2 = maps:put(container_id, ContainerId2, connection_config(2, Config)),
+    {ok, C0} = amqp10_client:open_connection(Cfg0),
+    {ok, C2} = amqp10_client:open_connection(Cfg2),
     receive {amqp10_event, {connection, C0, opened}} -> ok
     after 5000 -> ct:fail({missing_event, ?LINE})
     end,
@@ -3706,8 +3710,8 @@ list_connections(Config) ->
     after 5000 -> ct:fail({missing_event, ?LINE})
     end,
 
-    {ok, StdOut} = rabbit_ct_broker_helpers:rabbitmqctl(Config, 0, ["list_connections", "--silent", "protocol"]),
-    Protocols0 = re:split(StdOut, <<"\n">>, [trim]),
+    {ok, StdOut0} = rabbit_ct_broker_helpers:rabbitmqctl(Config, 0, ["list_connections", "--silent", "protocol"]),
+    Protocols0 = re:split(StdOut0, <<"\n">>, [trim]),
     %% Remove any whitespaces.
     Protocols1 = [binary:replace(Subject, <<" ">>, <<>>, [global]) || Subject <- Protocols0],
     Protocols = lists:sort(Protocols1),
@@ -3715,6 +3719,13 @@ list_connections(Config) ->
                   <<"{1,0}">>,
                   <<"{1,0}">>],
                  Protocols),
+
+    %% CLI should list AMQP 1.0 container-id
+    {ok, StdOut1} = rabbit_ct_broker_helpers:rabbitmqctl(Config, 0, ["list_connections", "--silent", "container_id"]),
+    ContainerIds0 = re:split(StdOut1, <<"\n">>, [trim]),
+    ContainerIds = lists:sort(ContainerIds0),
+    ?assertEqual([<<>>, ContainerId0, ContainerId2],
+                 ContainerIds),
 
     ok = rabbit_ct_client_helpers:close_connection(Connection091),
     ok = close_connection_sync(C0),
@@ -4401,21 +4412,6 @@ idle_time_out_too_short(Config) ->
     receive {amqp10_event, {connection, Connection, {closed, _}}} -> ok
     after 5000 -> ct:fail({missing_event, ?LINE})
     end.
-
-rabbit_status_connection_count(Config) ->
-    %% Close any open AMQP 0.9.1 connections from previous test cases.
-    ok = rabbit_ct_client_helpers:close_channels_and_connection(Config, 0),
-
-    OpnConf = connection_config(Config),
-    {ok, Connection} = amqp10_client:open_connection(OpnConf),
-    receive {amqp10_event, {connection, Connection, opened}} -> ok
-    after 5000 -> ct:fail({missing_event, ?LINE})
-    end,
-
-    {ok, String} = rabbit_ct_broker_helpers:rabbitmqctl(Config, 0, ["status"]),
-    ?assertNotEqual(nomatch, string:find(String, "Connection count: 1")),
-
-    ok = amqp10_client:close_connection(Connection).
 
 handshake_timeout(Config) ->
     App = rabbit,
@@ -6037,8 +6033,8 @@ find_event(Type, Props, Events) when is_list(Props), is_list(Events) ->
       fun(#event{type = EventType, props = EventProps}) ->
               Type =:= EventType andalso
                 lists:all(
-                  fun({Key, _Value}) ->
-                          lists:keymember(Key, 1, EventProps)
+                  fun(Prop) ->
+                          lists:member(Prop, EventProps)
                   end, Props)
       end, Events).
 

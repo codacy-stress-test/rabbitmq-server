@@ -83,11 +83,13 @@
 
 
 <div class="section">
-  <h2>Experimental Feature Flags</h2>
+  <h2>Opt-in Feature Flags</h2>
   <div class="hider">
 <% if (feature_flags.length > 0) { %>
 <p class="warning">
-  Feature flags listed below are experimental. They should not be enabled in a production deployment.
+These feature flags opt-in.
+
+These flags can be enabled in production deployments after an appropriate amount of testing in non-production environments.
 </p>
 <table class="list">
   <thead>
@@ -119,7 +121,7 @@
            <% if (feature_flag.state == "disabled") { %>
 	      <div>
               <input id="<%= feature_flag.name %>" type="checkbox" class="riskCheckbox" onclick="this.parentNode.querySelector('.enable-feature-flag input[type=submit]').disabled = !this.checked;">
-              <label for="<%= feature_flag.name %>"> I understand the risk</label><br>
+              <label for="<%= feature_flag.name %>">I understand that once enabled, this feature flag cannot be disabled</label><br>
 	      <br>
               <form action="#/feature-flags-enable" method="put" style="display: inline-block" class="enable-feature-flag">
               <input type="hidden" name="name" value="<%= fmt_string(feature_flag.name) %>"/>

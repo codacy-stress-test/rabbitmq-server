@@ -1691,7 +1691,10 @@ delete_crashed(Q) when ?amqqueue_is_classic(Q) ->
 delete_crashed(Q, ActingUser) when ?amqqueue_is_classic(Q) ->
     rabbit_classic_queue:delete_crashed(Q, ActingUser).
 
--spec delete_crashed_internal(amqqueue:amqqueue(), rabbit_types:username()) -> 'ok'.
+-spec delete_crashed_internal(Q, ActingUser) -> Ret when
+      Q :: amqqueue:amqqueue(),
+      ActingUser :: rabbit_types:username(),
+      Ret :: ok | {error, timeout}.
 delete_crashed_internal(Q, ActingUser) when ?amqqueue_is_classic(Q) ->
     rabbit_classic_queue:delete_crashed_internal(Q, ActingUser).
 
@@ -1816,6 +1819,7 @@ internal_delete(Queue, ActingUser, Reason) ->
 %% TODO this is used by `rabbit_mnesia:remove_node_if_mnesia_running`
 %% Does it make any sense once mnesia is not used/removed?
 forget_all_durable(Node) ->
+    rabbit_log:info("Will remove all classic queues from node ~ts. The node is likely being removed from the cluster.", [Node]),
     UpdateFun = fun(Q) ->
                         forget_node_for_queue(Q)
                 end,

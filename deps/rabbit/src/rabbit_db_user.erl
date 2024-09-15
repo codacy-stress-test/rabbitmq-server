@@ -75,8 +75,8 @@
 -define(MNESIA_TABLE, rabbit_user).
 -define(PERM_MNESIA_TABLE, rabbit_user_permission).
 -define(TOPIC_PERM_MNESIA_TABLE, rabbit_topic_permission).
--define(KHEPRI_USERS_PROJECTION, rabbit_khepri_users).
--define(KHEPRI_PERMISSIONS_PROJECTION, rabbit_khepri_user_permissions).
+-define(KHEPRI_USERS_PROJECTION, rabbit_khepri_user).
+-define(KHEPRI_PERMISSIONS_PROJECTION, rabbit_khepri_user_permission).
 
 %% -------------------------------------------------------------------
 %% create().
@@ -640,7 +640,7 @@ clear_all_permissions_for_vhost_in_khepri(VHostName) ->
                             TopicProps,
                             rabbit_khepri:collect_payloads(UserProps)),
               {ok, Deletions}
-      end, rw).
+      end, rw, #{timeout => infinity}).
 
 %% -------------------------------------------------------------------
 %% get_topic_permissions().
