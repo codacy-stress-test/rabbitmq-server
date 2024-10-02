@@ -26,7 +26,7 @@ exports_files(glob([
 ]) + ["INSTALL"])
 
 _APP_ENV = """[
-	    %% See https://www.rabbitmq.com/consumers.html#acknowledgement-timeout
+	    %% See https://www.rabbitmq.com/docs/consumers#acknowledgement-timeout
 	    %% 30 minutes
 	    {consumer_timeout, 1800000},
 	    {tcp_listeners, [5672]},
@@ -132,13 +132,10 @@ _APP_ENV = """[
         {credentials_obfuscation_fallback_secret, <<"nocookie">>},
         {dead_letter_worker_consumer_prefetch, 32},
         {dead_letter_worker_publisher_confirm_timeout, 180000},
-
-        %% EOL date for the current release series, if known/announced
-		{release_series_eol_date, none},
-
 		{vhost_process_reconciliation_run_interval, 30},
         %% for testing
-        {vhost_process_reconciliation_enabled, true}
+        {vhost_process_reconciliation_enabled, true},
+        {license_line, "Licensed under the MPL 2.0. Website: https://rabbitmq.com"}
 	  ]
 """
 
@@ -463,18 +460,9 @@ rabbitmq_integration_suite(
 )
 
 rabbitmq_integration_suite(
-    name = "feature_flags_with_unpriveleged_user_SUITE",
-    size = "large",
-    additional_beam = [
-        ":feature_flags_SUITE_beam_files",
-    ],
-    flaky = True,
-    shard_count = 2,
-    # The enabling_* tests chmod files and then expect writes to be blocked.
-    # This probably doesn't work because we are root in the remote docker image.
-    tags = ["no-remote-exec"],
+    name = "msg_size_metrics_SUITE",
     runtime_deps = [
-        "//deps/rabbit/test/feature_flags_SUITE_data/my_plugin:erlang_app",
+        "//deps/rabbitmq_amqp_client:erlang_app",
     ],
 )
 
@@ -991,6 +979,11 @@ rabbitmq_integration_suite(
 rabbitmq_integration_suite(
     name = "unit_log_management_SUITE",
     size = "medium",
+)
+
+rabbitmq_suite(
+    name = "unit_msg_size_metrics_SUITE",
+    size = "small",
 )
 
 rabbitmq_suite(

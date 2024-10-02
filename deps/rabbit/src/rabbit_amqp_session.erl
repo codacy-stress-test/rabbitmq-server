@@ -140,6 +140,7 @@
          }).
 
 -record(incoming_link, {
+          snd_settle_mode :: snd_settle_mode(),
           %% The exchange is either defined in the ATTACH frame and static for
           %% the life time of the link or dynamically provided in each message's
           %% "to" field (address v2).
@@ -1232,7 +1233,7 @@ handle_attach(#'v1_0.attach'{role = ?AMQP_ROLE_SENDER,
                              name = LinkName,
                              handle = Handle = ?UINT(HandleInt),
                              source = Source,
-                             snd_settle_mode = SndSettleMode,
+                             snd_settle_mode = MaybeSndSettleMode,
                              target = Target,
                              initial_delivery_count = DeliveryCount = ?UINT(DeliveryCountInt)
                             },
@@ -1243,8 +1244,10 @@ handle_attach(#'v1_0.attach'{role = ?AMQP_ROLE_SENDER,
                                          user = User}}) ->
     case ensure_target(Target, Vhost, User, PermCache0) of
         {ok, Exchange, RoutingKey, QNameBin, PermCache} ->
+            SndSettleMode = snd_settle_mode(MaybeSndSettleMode),
             MaxMessageSize = persistent_term:get(max_message_size),
             IncomingLink = #incoming_link{
+                              snd_settle_mode = SndSettleMode,
                               exchange = Exchange,
                               routing_key = RoutingKey,
                               queue_name_bin = QNameBin,
@@ -1256,7 +1259,7 @@ handle_attach(#'v1_0.attach'{role = ?AMQP_ROLE_SENDER,
                        name = LinkName,
                        handle = Handle,
                        source = Source,
-                       snd_settle_mode = SndSettleMode,
+                       snd_settle_mode = MaybeSndSettleMode,
                        rcv_settle_mode = ?V_1_0_RECEIVER_SETTLE_MODE_FIRST,
                        target = Target,
                        %% We are the receiver.
@@ -2304,7 +2307,8 @@ incoming_link_transfer(
                    rcv_settle_mode = RcvSettleMode,
                    handle = Handle = ?UINT(HandleInt)},
   MsgPart,
-  #incoming_link{exchange = LinkExchange,
+  #incoming_link{snd_settle_mode = SndSettleMode,
+                 exchange = LinkExchange,
                  routing_key = LinkRKey,
                  max_message_size = MaxMessageSize,
                  delivery_count = DeliveryCount0,
@@ -2335,8 +2339,12 @@ incoming_link_transfer(
             ok = validate_multi_transfer_settled(MaybeSettled, FirstSettled),
             {MsgBin0, FirstDeliveryId, FirstSettled}
     end,
+    validate_transfer_snd_settle_mode(SndSettleMode, Settled),
     validate_transfer_rcv_settle_mode(RcvSettleMode, Settled),
-    validate_message_size(PayloadBin, MaxMessageSize),
+    PayloadSize = iolist_size(PayloadBin),
+    validate_message_size(PayloadSize, MaxMessageSize),
+    rabbit_msg_size_metrics:observe(?PROTOCOL, PayloadSize),
+    messages_received(Settled),
 
     Mc0 = mc:init(mc_amqp, PayloadBin, #{}),
     case lookup_target(LinkExchange, LinkRKey, Mc0, Vhost, User, PermCache0) of
@@ -2345,7 +2353,6 @@ incoming_link_transfer(
             check_user_id(Mc2, User),
             TopicPermCache = check_write_permitted_on_topic(
                                X, User, RoutingKey, TopicPermCache0),
-            messages_received(Settled),
             QNames = rabbit_exchange:route(X, Mc2, #{return_binding_keys => true}),
             rabbit_trace:tap_in(Mc2, QNames, ConnName, ChannelNum, Username, Trace),
             Opts = #{correlation => {HandleInt, DeliveryId}},
@@ -2381,9 +2388,34 @@ incoming_link_transfer(
                                    [DeliveryTag, DeliveryId, Reason])
             end;
         {error, #'v1_0.error'{} = Err} ->
-            Disposition = released(DeliveryId),
-            Detach = detach(HandleInt, Link0, Err),
-            {error, [Disposition, Detach]}
+            Disposition = case Settled of
+                              true -> [];
+                              false -> [released(DeliveryId)]
+                          end,
+            Detach = [detach(HandleInt, Link0, Err)],
+            {error, Disposition ++ Detach};
+        {error, anonymous_terminus, #'v1_0.error'{} = Err} ->
+            %% https://docs.oasis-open.org/amqp/anonterm/v1.0/cs01/anonterm-v1.0-cs01.html#doc-routingerrors
+            case Settled of
+                true ->
+                    Info = {map, [{{symbol, <<"delivery-tag">>}, DeliveryTag}]},
+                    Err1 = Err#'v1_0.error'{info = Info},
+                    Detach = detach(HandleInt, Link0, Err1),
+                    {error, [Detach]};
+                false ->
+                    Disposition = rejected(DeliveryId, Err),
+                    DeliveryCount = add(DeliveryCount0, 1),
+                    Credit1 = Credit0 - 1,
+                    {Credit, Reply0} = maybe_grant_link_credit(
+                                         Credit1, MaxLinkCredit,
+                                         DeliveryCount, map_size(U0), Handle),
+                    Reply = [Disposition | Reply0],
+                    Link = Link0#incoming_link{
+                             delivery_count = DeliveryCount,
+                             credit = Credit,
+                             multi_transfer_msg = undefined},
+                    {ok, Reply, Link, State0}
+            end
     end.
 
 lookup_target(#exchange{} = X, LinkRKey, Mc, _, _, PermCache) ->
@@ -2407,16 +2439,16 @@ lookup_target(to, to, Mc, Vhost, User, PermCache0) ->
                             check_internal_exchange(X),
                             lookup_routing_key(X, RKey, Mc, PermCache);
                         {error, not_found} ->
-                            {error, error_not_found(XName)}
+                            {error, anonymous_terminus, error_not_found(XName)}
                     end;
                 {error, bad_address} ->
-                    {error,
+                    {error, anonymous_terminus,
                      #'v1_0.error'{
                         condition = ?V_1_0_AMQP_ERROR_PRECONDITION_FAILED,
                         description = {utf8, <<"bad 'to' address string: ", String/binary>>}}}
             end;
         undefined ->
-            {error,
+            {error, anonymous_terminus,
              #'v1_0.error'{
                 condition = ?V_1_0_AMQP_ERROR_PRECONDITION_FAILED,
                 description = {utf8, <<"anonymous terminus requires 'to' address to be set">>}}}
@@ -2459,6 +2491,12 @@ released(DeliveryId) ->
                         first = ?UINT(DeliveryId),
                         settled = true,
                         state = #'v1_0.released'{}}.
+
+rejected(DeliveryId, Error) ->
+    #'v1_0.disposition'{role = ?AMQP_ROLE_RECEIVER,
+                        first = ?UINT(DeliveryId),
+                        settled = true,
+                        state = #'v1_0.rejected'{error = Error}}.
 
 maybe_grant_link_credit(Credit, MaxLinkCredit, DeliveryCount, NumUnconfirmed, Handle) ->
     case grant_link_credit(Credit, MaxLinkCredit, NumUnconfirmed) of
@@ -2912,6 +2950,15 @@ credit_reply_timeout(QType, QName) ->
 default(undefined, Default) -> Default;
 default(Thing,    _Default) -> Thing.
 
+snd_settle_mode({ubyte, Val}) ->
+    case Val of
+        0 -> unsettled;
+        1 -> settled;
+        2 -> mixed
+    end;
+snd_settle_mode(undefined) ->
+    mixed.
+
 transfer_frames(Transfer, Sections, unlimited) ->
     [[Transfer, Sections]];
 transfer_frames(Transfer, Sections, MaxFrameSize) ->
@@ -3057,6 +3104,22 @@ validate_multi_transfer_settled(Other, First)
       "(interpreted) field 'settled' on first transfer (~p)",
       [Other, First]).
 
+validate_transfer_snd_settle_mode(mixed, _Settled) ->
+    ok;
+validate_transfer_snd_settle_mode(unsettled, false) ->
+    %% "If the negotiated value for snd-settle-mode at attachment is unsettled,
+    %% then this field MUST be false (or unset) on every transfer frame for a delivery" [2.7.5]
+    ok;
+validate_transfer_snd_settle_mode(settled, true) ->
+    %% "If the negotiated value for snd-settle-mode at attachment is settled,
+    %% then this field MUST be true on at least one transfer frame for a delivery" [2.7.5]
+    ok;
+validate_transfer_snd_settle_mode(SndSettleMode, Settled) ->
+    protocol_error(
+      ?V_1_0_CONNECTION_ERROR_FRAMING_ERROR,
+      "sender settle mode is '~s' but transfer settled flag is interpreted as being '~s'",
+      [SndSettleMode, Settled]).
+
 %% "If the message is being sent settled by the sender,
 %% the value of this field [rcv-settle-mode] is ignored." [2.7.5]
 validate_transfer_rcv_settle_mode(?V_1_0_RECEIVER_SETTLE_MODE_SECOND, _Settled = false) ->
@@ -3066,9 +3129,8 @@ validate_transfer_rcv_settle_mode(_, _) ->
 
 validate_message_size(_, unlimited) ->
     ok;
-validate_message_size(Message, MaxMsgSize)
-  when is_integer(MaxMsgSize) ->
-    MsgSize = iolist_size(Message),
+validate_message_size(MsgSize, MaxMsgSize)
+  when is_integer(MsgSize) ->
     case MsgSize =< MaxMsgSize of
         true ->
             ok;
@@ -3082,7 +3144,9 @@ validate_message_size(Message, MaxMsgSize)
               ?V_1_0_LINK_ERROR_MESSAGE_SIZE_EXCEEDED,
               "message size (~b bytes) > maximum message size (~b bytes)",
               [MsgSize, MaxMsgSize])
-    end.
+    end;
+validate_message_size(Msg, MaxMsgSize) ->
+    validate_message_size(iolist_size(Msg), MaxMsgSize).
 
 -spec ensure_terminus(source | target,
                       term(),
