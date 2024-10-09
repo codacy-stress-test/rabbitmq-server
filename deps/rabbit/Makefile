@@ -239,16 +239,26 @@ define ct_master.erl
 	peer:call(Pid2, persistent_term, put, [rabbit_ct_tcp_port_base, 25000]),
 	peer:call(Pid3, persistent_term, put, [rabbit_ct_tcp_port_base, 27000]),
 	peer:call(Pid4, persistent_term, put, [rabbit_ct_tcp_port_base, 29000]),
-	ct_master:run("$1"),
+	ct_master_fork:run("$1"),
+	Fail1 = peer:call(Pid1, cth_parallel_ct_detect_failure, has_failures, []),
+	Fail2 = peer:call(Pid2, cth_parallel_ct_detect_failure, has_failures, []),
+	Fail3 = peer:call(Pid3, cth_parallel_ct_detect_failure, has_failures, []),
+	Fail4 = peer:call(Pid4, cth_parallel_ct_detect_failure, has_failures, []),
 	peer:stop(Pid4),
 	peer:stop(Pid3),
 	peer:stop(Pid2),
 	peer:stop(Pid1),
-	halt()
+	if
+		Fail1 -> halt(1);
+		Fail2 -> halt(2);
+		Fail3 -> halt(3);
+		Fail4 -> halt(4);
+		true -> halt(0)
+	end
 endef
 
 PARALLEL_CT_SET_1_A = amqp_client unit_cluster_formation_locking_mocks unit_cluster_formation_sort_nodes unit_collections unit_config_value_encryption unit_connection_tracking
-PARALLEL_CT_SET_1_B = amqp_address amqp_auth amqp_credit_api_v2 amqp_system signal_handling single_active_consumer unit_access_control_authn_authz_context_propagation unit_access_control_credential_validation unit_amqp091_content_framing unit_amqp091_server_properties unit_app_management
+PARALLEL_CT_SET_1_B = amqp_address amqp_auth amqp_credit_api_v2 amqp_filtex amqp_system signal_handling single_active_consumer unit_access_control_authn_authz_context_propagation unit_access_control_credential_validation unit_amqp091_content_framing unit_amqp091_server_properties unit_app_management
 PARALLEL_CT_SET_1_C = amqp_proxy_protocol amqpl_consumer_ack amqpl_direct_reply_to backing_queue bindings rabbit_db_maintenance rabbit_db_msup rabbit_db_policy rabbit_db_queue rabbit_db_topic_exchange rabbit_direct_reply_to_prop cluster_limit cluster_minority term_to_binary_compat_prop topic_permission transactions unicode unit_access_control
 PARALLEL_CT_SET_1_D = amqqueue_backward_compatibility channel_interceptor channel_operation_timeout classic_queue classic_queue_prop config_schema peer_discovery_dns peer_discovery_tmp_hidden_node per_node_limit per_user_connection_channel_limit
 

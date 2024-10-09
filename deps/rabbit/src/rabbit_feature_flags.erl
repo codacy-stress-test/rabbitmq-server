@@ -2,11 +2,13 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2024 Broadcom. All Rights Reserved. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
+%% Copyright (c) 2019-2024 Broadcom. All Rights Reserved. The term “Broadcom”
+%% refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
 %%
 
 %% @author The RabbitMQ team
-%% @copyright 2007-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries. All rights reserved.
+%% @copyright 2019-2024 Broadcom. The term “Broadcom” refers to Broadcom Inc.
+%% and/or its subsidiaries. All rights reserved.
 %%
 %% @doc
 %% This module offers a framework to declare capabilities a RabbitMQ node
@@ -742,7 +744,7 @@ get_stability(FeatureName) when is_atom(FeatureName) ->
         undefined    -> undefined;
         FeatureProps -> get_stability(FeatureProps)
     end;
-get_stability(FeatureProps) when  ?IS_FEATURE_FLAG(FeatureProps) ->
+get_stability(FeatureProps) when ?IS_FEATURE_FLAG(FeatureProps) ->
     maps:get(stability, FeatureProps, stable);
 get_stability(FeatureProps) when ?IS_DEPRECATION(FeatureProps) ->
     Phase = rabbit_deprecated_features:get_phase(FeatureProps),
