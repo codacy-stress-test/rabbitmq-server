@@ -391,7 +391,7 @@ init({ReaderPid, WriterPid, ChannelNum, MaxFrameSize, User, Vhost, ConnName,
          outgoing_window = ?UINT(RemoteOutgoingWindow),
          handle_max = ClientHandleMax}}) ->
     process_flag(trap_exit, true),
-    process_flag(message_queue_data, off_heap),
+    rabbit_process_flag:adjust_for_message_handling_proc(),
 
     ok = pg:join(pg_scope(), self(), self()),
     Alarms0 = rabbit_alarm:register(self(), {?MODULE, conserve_resources, []}),
@@ -514,12 +514,16 @@ handle_cast({frame_body, FrameBody},
             noreply(State);
         {stop, _, _} = Stop ->
             Stop
-    catch exit:#'v1_0.error'{} = Error ->
-              log_error_and_close_session(Error, State0);
-          exit:normal ->
+    catch exit:normal ->
               {stop, normal, State0};
+          exit:#'v1_0.error'{} = Error ->
+              log_error_and_close_session(Error, State0);
           _:Reason:Stacktrace ->
-              {stop, {Reason, Stacktrace}, State0}
+              Description = unicode:characters_to_binary(
+                              lists:flatten(io_lib:format("~tp~n~tp", [Reason, Stacktrace]))),
+              Err = #'v1_0.error'{condition = ?V_1_0_AMQP_ERROR_INTERNAL_ERROR,
+                                  description = {utf8, Description}},
+              log_error_and_close_session(Err, State0)
     end;
 handle_cast({queue_event, _, _} = QEvent, State0) ->
     try handle_queue_event(QEvent, State0) of
@@ -1938,7 +1942,7 @@ settle_op_from_outcome(#'v1_0.modified'{delivery_failed = DelFailed,
                    Anns1 = lists:map(
                              %% "all symbolic keys except those beginning with "x-" are reserved." [3.2.10]
                              fun({{symbol, <<"x-", _/binary>> = K}, V}) ->
-                                     {K, unwrap(V)}
+                                     {K, unwrap_simple_type(V)}
                              end, KVList),
                    maps:from_list(Anns1)
            end,
@@ -3624,7 +3628,14 @@ format_status(
               topic_permission_cache => TopicPermissionCache},
     maps:update(state, State, Status).
 
-unwrap({_Tag, V}) ->
+
+unwrap_simple_type(V = {list, _}) ->
     V;
-unwrap(V) ->
+unwrap_simple_type(V = {map, _}) ->
+    V;
+unwrap_simple_type(V = {array, _, _}) ->
+    V;
+unwrap_simple_type({_SimpleType, V}) ->
+    V;
+unwrap_simple_type(V) ->
     V.

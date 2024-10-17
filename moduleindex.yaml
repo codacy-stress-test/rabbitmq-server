@@ -696,6 +696,7 @@ rabbit:
 - rabbit_prelaunch_logging
 - rabbit_priority_queue
 - rabbit_process
+- rabbit_process_flag
 - rabbit_queue_consumers
 - rabbit_queue_decorator
 - rabbit_queue_index
@@ -836,7 +837,10 @@ rabbitmq_auth_backend_oauth2:
 - Elixir.RabbitMQ.CLI.Ctl.Commands.AddUaaKeyCommand
 - rabbit_auth_backend_oauth2
 - rabbit_auth_backend_oauth2_app
-- rabbit_oauth2_config
+- rabbit_oauth2_keycloak
+- rabbit_oauth2_provider
+- rabbit_oauth2_rar
+- rabbit_oauth2_resource_server
 - rabbit_oauth2_schema
 - rabbit_oauth2_scope
 - uaa_jwks
@@ -864,9 +868,10 @@ rabbitmq_consistent_hash_exchange:
 rabbitmq_ct_client_helpers:
 - rabbit_ct_client_helpers
 rabbitmq_ct_helpers:
+- ct_master_event_fork
 - ct_master_fork
+- ct_master_logs_fork
 - cth_log_redirect_any_domains
-- cth_parallel_ct_detect_failure
 - rabbit_control_helper
 - rabbit_ct_broker_helpers
 - rabbit_ct_config_schema
@@ -927,6 +932,7 @@ rabbitmq_management:
 - rabbit_mgmt_nodes
 - rabbit_mgmt_oauth_bootstrap
 - rabbit_mgmt_reset_handler
+- rabbit_mgmt_schema
 - rabbit_mgmt_stats
 - rabbit_mgmt_sup
 - rabbit_mgmt_sup_sup
