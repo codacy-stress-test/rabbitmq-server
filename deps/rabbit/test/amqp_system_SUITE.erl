@@ -38,7 +38,6 @@ groups() ->
           routing,
           invalid_routes,
           auth_failure,
-          access_failure,
           access_failure_not_allowed,
           access_failure_send,
           streams
@@ -51,6 +50,11 @@ groups() ->
 %% -------------------------------------------------------------------
 %% Testsuite setup/teardown.
 %% -------------------------------------------------------------------
+
+suite() ->
+    [
+      {timetrap, {minutes, 3}}
+    ].
 
 init_per_suite(Config) ->
     rabbit_ct_helpers:log_environment(),
@@ -212,30 +216,22 @@ invalid_routes(Config) ->
 auth_failure(Config) ->
     run(Config, [ {dotnet, "auth_failure"} ]).
 
-access_failure(Config) ->
-    User = atom_to_binary(?FUNCTION_NAME),
-    rabbit_ct_broker_helpers:add_user(Config, User, <<"boo">>),
-    rabbit_ct_broker_helpers:set_permissions(Config, User, <<"/">>,
-                                             <<".*">>, %% configure
-                                             <<"^banana.*">>, %% write
-                                             <<"^banana.*">>  %% read
-                                            ),
-    run(Config, [ {dotnet, "access_failure"} ]).
-
 access_failure_not_allowed(Config) ->
     User = atom_to_binary(?FUNCTION_NAME),
-    rabbit_ct_broker_helpers:add_user(Config, User, <<"boo">>),
-    run(Config, [ {dotnet, "access_failure_not_allowed"} ]).
+    ok = rabbit_ct_broker_helpers:add_user(Config, User, <<"boo">>),
+    run(Config, [ {dotnet, "access_failure_not_allowed"} ]),
+    ok = rabbit_ct_broker_helpers:delete_user(Config, User).
 
 access_failure_send(Config) ->
     User = atom_to_binary(?FUNCTION_NAME),
-    rabbit_ct_broker_helpers:add_user(Config, User, <<"boo">>),
-    rabbit_ct_broker_helpers:set_permissions(Config, User, <<"/">>,
-                                             <<".*">>, %% configure
-                                             <<"^banana.*">>, %% write
-                                             <<"^banana.*">>  %% read
-                                            ),
-    run(Config, [ {dotnet, "access_failure_send"} ]).
+    ok = rabbit_ct_broker_helpers:add_user(Config, User, <<"boo">>),
+    ok = rabbit_ct_broker_helpers:set_permissions(Config, User, <<"/">>,
+                                                  <<".*">>, %% configure
+                                                  <<"^banana.*">>, %% write
+                                                  <<"^banana.*">>  %% read
+                                                 ),
+    run(Config, [ {dotnet, "access_failure_send"} ]),
+    ok = rabbit_ct_broker_helpers:delete_user(Config, User).
 
 run(Config, Flavors) ->
     ClientLibrary = ?config(amqp_client_library, Config),

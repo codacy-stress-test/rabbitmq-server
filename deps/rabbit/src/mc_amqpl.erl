@@ -11,6 +11,7 @@
          init/1,
          size/1,
          x_header/2,
+         x_headers/1,
          routing_headers/2,
          convert_to/3,
          convert_from/3,
@@ -272,6 +273,23 @@ x_header(Key, #content{properties = #'P_basic'{headers = Headers}}) ->
 x_header(Key, #content{properties = none} = Content0) ->
     Content = rabbit_binary_parser:ensure_content_decoded(Content0),
     x_header(Key, Content).
+
+x_headers(#content{properties = #'P_basic'{headers = undefined}}) ->
+    #{};
+x_headers(#content{properties = #'P_basic'{headers = Headers}}) ->
+    L = lists:filtermap(
+          fun({Name, Type, Val}) ->
+                  case mc_util:is_x_header(Name) of
+                      true ->
+                          {true, {Name, from_091(Type, Val)}};
+                      false ->
+                          false
+                  end
+          end, Headers),
+    maps:from_list(L);
+x_headers(#content{properties = none} = Content0) ->
+    Content = rabbit_binary_parser:ensure_content_decoded(Content0),
+    x_headers(Content).
 
 property(Prop, Content) ->
     mc_util:infer_type(mc_compat:get_property(Prop, Content)).
@@ -707,7 +725,6 @@ supported_header_value_type(table) ->
 supported_header_value_type(_) ->
     true.
 
-
 amqp10_map_get(_K, []) ->
     undefined;
 amqp10_map_get(K, Tuples) ->
@@ -754,9 +771,14 @@ to_091(Key, false) -> {Key, bool, false};
 to_091(Key, undefined) -> {Key, void, undefined};
 to_091(Key, null) -> {Key, void, undefined};
 to_091(Key, {list, L}) ->
-    {Key, array, [to_091(V) || V <- L]};
+    to_091_array(Key, L);
 to_091(Key, {map, M}) ->
-    {Key, table, [to_091(unwrap(K), V) || {K, V} <- M]}.
+    {Key, table, [to_091(unwrap(K), V) || {K, V} <- M]};
+to_091(Key, {array, _T, L}) ->
+    to_091_array(Key, L).
+
+to_091_array(Key, L) ->
+    {Key, array, [to_091(V) || V <- L]}.
 
 to_091({utf8, V}) -> {longstr, V};
 to_091({symbol, V}) -> {longstr, V};

@@ -1559,7 +1559,7 @@ def test_suite_beam_files(name = "test_suite_beam_files"):
         outs = ["test/topic_permission_SUITE.beam"],
         app_name = "rabbit",
         erlc_opts = "//:test_erlc_opts",
-        deps = ["//deps/rabbit_common:erlang_app"],
+        deps = ["//deps/amqp10_common:erlang_app", "//deps/amqp_client:erlang_app"],
     )
     erlang_bytecode(
         name = "transactions_SUITE_beam_files",
@@ -2217,4 +2217,5 @@ def test_suite_beam_files(name = "test_suite_beam_files"):
         outs = ["test/amqp_utils.beam"],
         app_name = "rabbit",
         erlc_opts = "//:test_erlc_opts",
+        deps = ["//deps/amqp10_common:erlang_app"],
     )
