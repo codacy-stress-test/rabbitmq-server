@@ -1,4 +1,4 @@
-const { By, Key, until, Builder, Select } = require('selenium-webdriver')
+const { By, Key, until, Builder, Select, WebDriverError,  NoSuchSessionError } = require('selenium-webdriver')
 
 const MENU_TABS = By.css('div#menu ul#tabs')
 const USER = By.css('li#logout')
@@ -125,9 +125,10 @@ module.exports = class BasePage {
   }
 
 
-  async getTable(locator, firstNColumns) {
-    const table = await this.waitForDisplayed(locator)
-    const rows = await table.findElements(By.css('tbody tr'))
+  async getTable(tableLocator, firstNColumns, rowClass) {
+    const table = await this.waitForDisplayed(tableLocator)
+    const rows = await table.findElements(rowClass == undefined ? 
+        By.css('tbody tr') : By.css('tbody tr.' + rowClass))
     let table_model = []
     for (let row of rows) {
       let columns = await row.findElements(By.css('td'))
@@ -184,7 +185,9 @@ module.exports = class BasePage {
         'Timed out after [timeout=' + this.timeout + ';polling=' + this.polling + '] seconds locating ' + locator,
         this.polling)
     }catch(error) {
-      console.error("Failed to locate element " + locator)
+      if (!error.name.includes("NoSuchSessionError")) {
+        console.error("Failed waitForLocated " + locator + " due to " + error)
+      }
       throw error
     }
   }
@@ -194,8 +197,10 @@ module.exports = class BasePage {
       return this.driver.wait(until.elementIsVisible(element), this.timeout,
         'Timed out after [timeout=' + this.timeout + ';polling=' + this.polling + '] awaiting till visible ' + element,
         this.polling)
-    }catch(error) {
-      console.error("Failed to find visible element " + element)
+    }catch(error) {      
+      if (!error.name.includes("NoSuchSessionError")) {
+        console.error("Failed to find visible element " + element + " due to " + error)
+      }
       throw error
     }
   }
@@ -206,7 +211,9 @@ module.exports = class BasePage {
     try {
       return this.waitForVisible(await this.waitForLocated(locator))
     }catch(error) {
-      console.error("Failed to waitForDisplayed for locator " + locator)
+      if (!error.name.includes("NoSuchSessionError")) {
+        console.error("Failed to waitForDisplayed " + locator + " due to " + error)
+      }
       throw error
     }
   }

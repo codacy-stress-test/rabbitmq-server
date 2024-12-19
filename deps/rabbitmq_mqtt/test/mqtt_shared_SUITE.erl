@@ -53,6 +53,7 @@
 -define(RC_SERVER_SHUTTING_DOWN, 16#8B).
 -define(RC_KEEP_ALIVE_TIMEOUT, 16#8D).
 -define(RC_SESSION_TAKEN_OVER, 16#8E).
+-define(TIMEOUT, 30_000).
 
 all() ->
     [{group, mqtt}].
@@ -131,6 +132,7 @@ cluster_size_3_tests() ->
      pubsub,
      queue_down_qos1,
      consuming_classic_queue_down,
+     flow_classic_queue,
      flow_quorum_queue,
      flow_stream,
      rabbit_mqtt_qos0_queue,
@@ -486,6 +488,24 @@ publish_to_all_non_deprecated_queue_types(Config, QoS) ->
     ?awaitMatch([],
                 all_connection_pids(Config), 10_000, 1000).
 
+%% This test case does not require multiple nodes
+%% but it is grouped together with flow test cases for other queue types
+%% (and historically used to use a mirrored classic queue on multiple nodes)
+flow_classic_queue(Config) ->
+    %% New nodes lookup via persistent_term:get/1 (since 4.0.0)
+    %% Old nodes lookup via application:get_env/2. (that is taken care of by flow/3)
+    %% Therefore, we set both persistent_term and application.
+    Key = credit_flow_default_credit,
+    Val = {2, 1},
+    DefaultVal = rabbit_ct_broker_helpers:rpc(Config, persistent_term, get, [Key]),
+    Result = rpc_all(Config, persistent_term, put, [Key, Val]),
+    ?assert(lists:all(fun(R) -> R =:= ok end, Result)),
+
+    flow(Config, {rabbit, Key, Val}, <<"classic">>),
+
+    ?assertEqual(Result, rpc_all(Config, persistent_term, put, [Key, DefaultVal])),
+    ok.
+
 flow_quorum_queue(Config) ->
     flow(Config, {rabbit, quorum_commands_soft_limit, 1}, <<"quorum">>).
 
@@ -719,28 +739,28 @@ pubsub(Config) ->
     receive {publish, #{client_pid := C1,
                         qos := 1,
                         payload := <<"m1">>}} -> ok
-    after 1000 -> ct:fail("missing m1")
+    after ?TIMEOUT -> ct:fail("missing m1")
     end,
 
     ok = emqtt:publish(C0, Topic1, <<"m2">>, qos0),
     receive {publish, #{client_pid := C1,
                         qos := 0,
                         payload := <<"m2">>}} -> ok
-    after 1000 -> ct:fail("missing m2")
+    after ?TIMEOUT -> ct:fail("missing m2")
     end,
 
     {ok, _} = emqtt:publish(C1, Topic0, <<"m3">>, qos1),
     receive {publish, #{client_pid := C0,
                         qos := 1,
                         payload := <<"m3">>}} -> ok
-    after 1000 -> ct:fail("missing m3")
+    after ?TIMEOUT -> ct:fail("missing m3")
     end,
 
     ok = emqtt:publish(C1, Topic0, <<"m4">>, qos0),
     receive {publish, #{client_pid := C0,
                         qos := 0,
                         payload := <<"m4">>}} -> ok
-    after 1000 -> ct:fail("missing m4")
+    after ?TIMEOUT -> ct:fail("missing m4")
     end,
 
     ok = emqtt:disconnect(C0),
@@ -894,25 +914,22 @@ session_expiry(Config) ->
     ok = rpc(Config, application, set_env, [App, Par, DefaultVal]).
 
 non_clean_sess_reconnect_qos1(Config) ->
-    non_clean_sess_reconnect(Config, qos1).
+    non_clean_sess_reconnect(Config, 1).
 
 non_clean_sess_reconnect_qos0(Config) ->
-    non_clean_sess_reconnect(Config, qos0).
+    non_clean_sess_reconnect(Config, 0).
 
 non_clean_sess_reconnect(Config, SubscriptionQoS) ->
     Pub = connect(<<"publisher">>, Config),
     Topic = ClientId = atom_to_binary(?FUNCTION_NAME),
 
     C1 = connect(ClientId, Config, non_clean_sess_opts()),
-    {ok, _, _} = emqtt:subscribe(C1, Topic, SubscriptionQoS),
-    ?assertMatch(#{consumers := 1},
-                 get_global_counters(Config)),
+    {ok, _, [SubscriptionQoS]} = emqtt:subscribe(C1, Topic, SubscriptionQoS),
+    ok = await_consumer_count(1, ClientId, SubscriptionQoS, Config),
 
     ok = emqtt:disconnect(C1),
-    eventually(?_assertMatch(#{consumers := 0},
-                             get_global_counters(Config))),
+    ok = await_consumer_count(0, ClientId, SubscriptionQoS, Config),
 
-    timer:sleep(20),
     ok = emqtt:publish(Pub, Topic, <<"msg-3-qos0">>, qos0),
     {ok, _} = emqtt:publish(Pub, Topic, <<"msg-4-qos1">>, qos1),
 
@@ -920,8 +937,7 @@ non_clean_sess_reconnect(Config, SubscriptionQoS) ->
     %% Server should reply in CONNACK that it has session state.
     ?assertEqual({session_present, 1},
                  proplists:lookup(session_present, emqtt:info(C2))),
-    ?assertMatch(#{consumers := 1},
-                 get_global_counters(Config)),
+    ok = await_consumer_count(1, ClientId, SubscriptionQoS, Config),
 
     ok = emqtt:publish(Pub, Topic, <<"msg-5-qos0">>, qos0),
     {ok, _} = emqtt:publish(Pub, Topic, <<"msg-6-qos1">>, qos1),
@@ -954,21 +970,20 @@ non_clean_sess_reconnect_qos0_and_qos1(Config) ->
     ClientId = ?FUNCTION_NAME,
 
     C1 = connect(ClientId, Config, non_clean_sess_opts()),
-    {ok, _, [1, 0]} = emqtt:subscribe(C1, [{Topic1, qos1}, {Topic0, qos0}]),
-    ?assertMatch(#{consumers := 1},
-                 get_global_counters(Config)),
+    {ok, _, [1, 0]} = emqtt:subscribe(C1, [{Topic1, qos1},
+                                           {Topic0, qos0}]),
+    ok = await_consumer_count(1, ClientId, 0, Config),
+    ok = await_consumer_count(1, ClientId, 1, Config),
 
     ok = emqtt:disconnect(C1),
-    eventually(?_assertMatch(#{consumers := 0},
-                             get_global_counters(Config))),
-
+    ok = await_consumer_count(0, ClientId, 0, Config),
+    ok = await_consumer_count(0, ClientId, 1, Config),
     {ok, _} = emqtt:publish(Pub, Topic0, <<"msg-0">>, qos1),
     {ok, _} = emqtt:publish(Pub, Topic1, <<"msg-1">>, qos1),
 
     C2 = connect(ClientId, Config, non_clean_sess_opts()),
-    ?assertMatch(#{consumers := 1},
-                 get_global_counters(Config)),
-
+    ok = await_consumer_count(1, ClientId, 0, Config),
+    ok = await_consumer_count(1, ClientId, 1, Config),
     ok = expect_publishes(C2, Topic0, [<<"msg-0">>]),
     ok = expect_publishes(C2, Topic1, [<<"msg-1">>]),
 
@@ -1116,7 +1131,7 @@ many_qos1_messages(Config) ->
                   end, Payloads),
     receive
         proceed -> ok
-    after 30000 ->
+    after ?TIMEOUT ->
               ct:fail("message to proceed never received")
     end,
     ok = expect_publishes(C, Topic, Payloads),
@@ -1209,39 +1224,74 @@ management_plugin_connection(Config) ->
     Node = atom_to_binary(get_node_config(Config, 0, nodename)),
 
     C1 = connect(ClientId, Config, [{keepalive, KeepaliveSecs}]),
-    eventually(?_assertEqual(1, length(http_get(Config, "/connections"))), 1000, 10),
+    FilterFun =
+        fun(#{client_properties := #{client_id := CId}})
+              when CId == ClientId -> true;
+           (_) -> false
+        end,
+    %% Sometimes connections remain open from other testcases,
+    %% let's match the one we're looking for
+    eventually(
+      ?_assertMatch(
+         [_],
+         lists:filter(FilterFun, http_get(Config, "/connections"))),
+      1000, 10),
     [#{client_properties := #{client_id := ClientId},
        timeout := KeepaliveSecs,
        node := Node,
-       name := ConnectionName}] = http_get(Config, "/connections"),
+       name := ConnectionName}] =
+        lists:filter(FilterFun, http_get(Config, "/connections")),
     process_flag(trap_exit, true),
     http_delete(Config,
                 "/connections/" ++ binary_to_list(uri_string:quote(ConnectionName)),
                 ?NO_CONTENT),
     await_exit(C1),
-    ?assertEqual([], http_get(Config, "/connections")),
+    eventually(
+      ?_assertMatch(
+         [],
+         lists:filter(FilterFun, http_get(Config, "/connections"))),
+      1000, 10),
     eventually(?_assertEqual([], all_connection_pids(Config)), 500, 3),
-
+    
     C2 = connect(ClientId, Config, [{keepalive, KeepaliveSecs}]),
-    eventually(?_assertEqual(1, length(http_get(Config, "/connections"))), 1000, 10),
+    eventually(
+      ?_assertMatch(
+         [_],
+         lists:filter(FilterFun, http_get(Config, "/connections"))),
+      1000, 10),
     http_delete(Config,
                 "/connections/username/guest",
                 ?NO_CONTENT),
     await_exit(C2),
-    ?assertEqual([], http_get(Config, "/connections")),
+    eventually(
+      ?_assertMatch(
+         [],
+         lists:filter(FilterFun, http_get(Config, "/connections"))),
+      1000, 10),
     eventually(?_assertEqual([], all_connection_pids(Config)), 500, 3).
 
 management_plugin_enable(Config) ->
-    ?assertEqual(0, length(http_get(Config, "/connections"))),
     ok = rabbit_ct_broker_helpers:disable_plugin(Config, 0, rabbitmq_management),
     ok = rabbit_ct_broker_helpers:disable_plugin(Config, 0, rabbitmq_management_agent),
 
     %% If the (web) MQTT connection is established **before** the management plugin is enabled,
     %% the management plugin should still list the (web) MQTT connection.
-    C = connect(?FUNCTION_NAME, Config),
+    ClientId = atom_to_binary(?FUNCTION_NAME),
+    C = connect(ClientId, Config),
     ok = rabbit_ct_broker_helpers:enable_plugin(Config, 0, rabbitmq_management_agent),
     ok = rabbit_ct_broker_helpers:enable_plugin(Config, 0, rabbitmq_management),
-    eventually(?_assertEqual(1, length(http_get(Config, "/connections"))), 1000, 10),
+    FilterFun =
+        fun(#{client_properties := #{client_id := CId}})
+              when ClientId == CId -> true;
+           (_) -> false
+        end,
+    %% Sometimes connections remain open from other testcases,
+    %% let's match the one we're looking for
+    eventually(
+      ?_assertMatch(
+         [_],
+         lists:filter(FilterFun, http_get(Config, "/connections"))),
+      1000, 10),
 
     ok = emqtt:disconnect(C).
 
@@ -1334,7 +1384,7 @@ keepalive(Config) ->
                         retain := true,
                         topic := WillTopic,
                         payload := WillPayload}} -> ok
-    after 3000 -> ct:fail("missing will")
+    after ?TIMEOUT -> ct:fail("missing will")
     end,
     ok = emqtt:disconnect(C2).
 
@@ -1404,7 +1454,7 @@ session_switch(Config, Disconnect) ->
     receive {publish, #{client_pid := C2,
                         payload := <<"m1">>,
                         qos := 0}} -> ok
-    after 1000 -> ct:fail("did not receive m1 with QoS 0")
+    after ?TIMEOUT -> ct:fail("did not receive m1 with QoS 0")
     end,
     %% New connection should be able to unsubscribe.
     ?assertMatch({ok, _, _}, emqtt:unsubscribe(C2, Topic)),
@@ -1671,7 +1721,7 @@ max_packet_size_authenticated(Config) ->
         v4 -> ok;
         v5 -> ?assertMatch(#{'Maximum-Packet-Size' := MaxSize}, ConnAckProps),
               receive {disconnected, _ReasonCodePacketTooLarge = 149, _Props} -> ok
-              after 1000 -> ct:fail("missing DISCONNECT packet from server")
+              after ?TIMEOUT -> ct:fail("missing DISCONNECT packet from server")
               end
     end,
     ok = rpc(Config, persistent_term, put, [Key, OldMaxSize]).
@@ -1756,7 +1806,7 @@ incoming_message_interceptors(Config) ->
                                   headers = [{<<"timestamp_in_ms">>, long, Millis} | _XHeaders]
                                  }}} ->
                 ok
-    after 5000 -> ct:fail(missing_deliver)
+    after ?TIMEOUT -> ct:fail(missing_deliver)
     end,
 
     delete_queue(Ch, Stream),
@@ -1782,7 +1832,7 @@ retained_message_conversion(Config) ->
                         retain := true,
                         topic := Topic,
                         payload := Payload}} -> ok
-    after 1000 -> ct:fail("missing retained message")
+    after ?TIMEOUT -> ct:fail("missing retained message")
     end,
     ok = emqtt:publish(C, Topic, <<>>, [{retain, true}]),
     ok = emqtt:disconnect(C).
@@ -1868,7 +1918,7 @@ await_confirms_ordered(From, N, To) ->
             await_confirms_ordered(From, N + 1, To);
         Got ->
             ct:fail("Received unexpected message. Expected: ~p Got: ~p", [Expected, Got])
-    after 10_000 ->
+    after ?TIMEOUT ->
               ct:fail("Did not receive expected message: ~p", [Expected])
     end.
 
@@ -1880,9 +1930,20 @@ await_confirms_unordered(From, Left) ->
             await_confirms_unordered(From, Left - 1);
         Other ->
             ct:fail("Received unexpected message: ~p", [Other])
-    after 10_000 ->
+    after ?TIMEOUT ->
               ct:fail("~b confirms are missing", [Left])
     end.
+
+await_consumer_count(ConsumerCount, ClientId, QoS, Config) ->
+    Ch = rabbit_ct_client_helpers:open_channel(Config),
+    QueueName = rabbit_mqtt_util:queue_name_bin(
+                  rabbit_data_coercion:to_binary(ClientId), QoS),
+    eventually(
+      ?_assertMatch(
+         #'queue.declare_ok'{consumer_count = ConsumerCount},
+         amqp_channel:call(Ch, #'queue.declare'{queue = QueueName,
+                                                passive = true})), 500, 10),
+    ok = rabbit_ct_client_helpers:close_channel(Ch).
 
 declare_queue(Ch, QueueName, Args)
   when is_pid(Ch), is_binary(QueueName), is_list(Args) ->
@@ -1916,6 +1977,6 @@ assert_v5_disconnect_reason_code(Config, ReasonCode) ->
         v3 -> ok;
         v4 -> ok;
         v5 -> receive {disconnected, ReasonCode, _Props} -> ok
-              after 1000 -> ct:fail("missing DISCONNECT packet from server")
+              after ?TIMEOUT -> ct:fail("missing DISCONNECT packet from server")
               end
     end.

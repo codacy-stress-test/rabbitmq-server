@@ -879,6 +879,7 @@ rabbitmq_ct_helpers:
 - rabbit_ct_proper_helpers
 - rabbit_ct_vm_helpers
 - rabbit_mgmt_test_util
+- stream_test_utils
 rabbitmq_event_exchange:
 - rabbit_event_exchange_decorator
 - rabbit_exchange_type_event
@@ -948,6 +949,7 @@ rabbitmq_management:
 - rabbit_mgmt_wm_cluster_name
 - rabbit_mgmt_wm_connection
 - rabbit_mgmt_wm_connection_channels
+- rabbit_mgmt_wm_connection_sessions
 - rabbit_mgmt_wm_connection_user_name
 - rabbit_mgmt_wm_connections
 - rabbit_mgmt_wm_connections_vhost
@@ -1013,6 +1015,7 @@ rabbitmq_management:
 - rabbit_mgmt_wm_user_limits
 - rabbit_mgmt_wm_users
 - rabbit_mgmt_wm_users_bulk_delete
+- rabbit_mgmt_wm_version
 - rabbit_mgmt_wm_vhost
 - rabbit_mgmt_wm_vhost_restart
 - rabbit_mgmt_wm_vhosts

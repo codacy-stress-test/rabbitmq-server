@@ -96,7 +96,7 @@
 -include_lib("rabbit_common/include/logging.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 
--include("include/khepri.hrl").
+-include("include/rabbit_khepri.hrl").
 
 -export([setup/0,
          setup/1,
@@ -585,16 +585,36 @@ remove_down_member(NodeToRemove) ->
 %% @private
 
 reset() ->
-    %% Rabbit should be stopped, but Khepri needs to be running. Restart it.
-    ok = setup(),
-    ok = khepri_cluster:reset(?RA_CLUSTER_NAME),
-    ok = khepri:stop(?RA_CLUSTER_NAME).
+    case rabbit:is_running() of
+        false ->
+            %% Rabbit should be stopped, but Khepri needs to be running.
+            %% Restart it.
+            ok = setup(),
+            ok = khepri_cluster:reset(?RA_CLUSTER_NAME),
+            ok = khepri:stop(?RA_CLUSTER_NAME),
+
+            _ = file:delete(rabbit_guid:filename()),
+            ok;
+        true ->
+            throw({error, rabbitmq_unexpectedly_running})
+    end.
 
 %% @private
 
 force_reset() ->
-    DataDir = maps:get(data_dir, ra_system:fetch(coordination)),
-    ok = rabbit_file:recursive_delete(filelib:wildcard(DataDir ++ "/*")).
+    case rabbit:is_running() of
+        false ->
+            ok = khepri:stop(?RA_CLUSTER_NAME),
+            DataDir = maps:get(data_dir, ra_system:fetch(?RA_SYSTEM)),
+            ok = rabbit_ra_systems:ensure_ra_system_stopped(?RA_SYSTEM),
+            ok = rabbit_file:recursive_delete(
+                   filelib:wildcard(DataDir ++ "/*")),
+
+            _ = file:delete(rabbit_guid:filename()),
+            ok;
+        true ->
+            throw({error, rabbitmq_unexpectedly_running})
+    end.
 
 %% @private
 
@@ -807,7 +827,8 @@ cli_cluster_status() ->
             Nodes = locally_known_nodes(),
             [{nodes, [{disc, Nodes}]},
              {running_nodes, [N || N <- Nodes, rabbit_nodes:is_running(N)]},
-             {cluster_name, rabbit_nodes:cluster_name()}];
+             {cluster_name, rabbit_nodes:cluster_name()},
+             {partitions, []}];
         false ->
             []
     end.
@@ -923,7 +944,7 @@ cluster_status_from_khepri() ->
 %% This path must be prepended to all paths used by RabbitMQ subsystems.
 
 root_path() ->
-    ?KHEPRI_ROOT_PATH.
+    ?RABBITMQ_KHEPRI_ROOT_PATH.
 
 %% -------------------------------------------------------------------
 %% "Proxy" functions to Khepri API.

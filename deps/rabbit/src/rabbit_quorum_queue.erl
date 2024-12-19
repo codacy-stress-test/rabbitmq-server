@@ -316,9 +316,8 @@ declare_queue_error(Error, Queue, Leader, ActingUser) ->
 ra_machine(Q) ->
     {module, rabbit_fifo, ra_machine_config(Q)}.
 
-ra_machine_config(Q) when ?is_amqqueue(Q) ->
+gather_policy_config(Q, IsQueueDeclaration) ->
     QName = amqqueue:get_name(Q),
-    {Name, _} = amqqueue:get_pid(Q),
     %% take the minimum value of the policy and the queue arg if present
     MaxLength = args_policy_lookup(<<"max-length">>, fun min/2, Q),
     OverflowBin = args_policy_lookup(<<"overflow">>, fun policy_has_precedence/2, Q),
@@ -327,26 +326,40 @@ ra_machine_config(Q) when ?is_amqqueue(Q) ->
     DeliveryLimit = case args_policy_lookup(<<"delivery-limit">>,
                                             fun resolve_delivery_limit/2, Q) of
                         undefined ->
-                            rabbit_log:info("~ts: delivery_limit not set, defaulting to ~b",
-                                             [rabbit_misc:rs(QName), ?DEFAULT_DELIVERY_LIMIT]),
+                            case IsQueueDeclaration of
+                                true ->
+                                    rabbit_log:info(
+                                              "~ts: delivery_limit not set, defaulting to ~b",
+                                              [rabbit_misc:rs(QName), ?DEFAULT_DELIVERY_LIMIT]);
+                                false ->
+                                    ok
+                            end,
                             ?DEFAULT_DELIVERY_LIMIT;
                         DL ->
                             DL
                     end,
     Expires = args_policy_lookup(<<"expires">>, fun min/2, Q),
     MsgTTL = args_policy_lookup(<<"message-ttl">>, fun min/2, Q),
-    #{name => Name,
-      queue_resource => QName,
-      dead_letter_handler => dead_letter_handler(Q, Overflow),
-      become_leader_handler => {?MODULE, become_leader, [QName]},
+    DeadLetterHandler = dead_letter_handler(Q, Overflow),
+    #{dead_letter_handler => DeadLetterHandler,
       max_length => MaxLength,
       max_bytes => MaxBytes,
-      single_active_consumer_on => single_active_consumer_on(Q),
       delivery_limit => DeliveryLimit,
       overflow_strategy => Overflow,
-      created => erlang:system_time(millisecond),
       expires => Expires,
       msg_ttl => MsgTTL
+     }.
+
+ra_machine_config(Q) when ?is_amqqueue(Q) ->
+    PolicyConfig = gather_policy_config(Q, true),
+    QName = amqqueue:get_name(Q),
+    {Name, _} = amqqueue:get_pid(Q),
+    PolicyConfig#{
+      name => Name,
+      queue_resource => QName,
+      become_leader_handler => {?MODULE, become_leader, [QName]},
+      single_active_consumer_on => single_active_consumer_on(Q),
+      created => erlang:system_time(millisecond)
      }.
 
 resolve_delivery_limit(PolVal, ArgVal)
@@ -428,18 +441,27 @@ become_leader0(QName, Name) ->
 -spec all_replica_states() -> {node(), #{atom() => atom()}}.
 all_replica_states() ->
     Rows0 = ets:tab2list(ra_state),
-    Rows = lists:map(fun
-                         ({K, follower, promotable}) ->
-                             {K, promotable};
-                         ({K, follower, non_voter}) ->
-                             {K, non_voter};
-                         ({K, S, _}) ->
-                             %% voter or unknown
-                             {K, S};
-                         (T) ->
-                             T
-                     end, Rows0),
+    Rows = lists:filtermap(
+                    fun
+                        (T = {K, _, _}) ->
+                            case whereis(K) of
+                                undefined ->
+                                    false;
+                                P when is_pid(P) ->
+                                    {true, to_replica_state(T)}
+                            end;
+                        (_T) ->
+                            false
+                    end, Rows0),
     {node(), maps:from_list(Rows)}.
+
+to_replica_state({K, follower, promotable}) ->
+    {K, promotable};
+to_replica_state({K, follower, non_voter}) ->
+    {K, non_voter};
+to_replica_state({K, S, _}) ->
+    %% voter or unknown
+    {K, S}.
 
 -spec list_with_minimum_quorum() -> [amqqueue:amqqueue()].
 list_with_minimum_quorum() ->
@@ -624,14 +646,19 @@ handle_tick(QName,
                           ok;
                       _ ->
                           ok
-                  end
+                  end,
+                  maybe_apply_policies(Q, Overview),
+                  ok
               catch
                   _:Err ->
                       rabbit_log:debug("~ts: handle tick failed with ~p",
                                        [rabbit_misc:rs(QName), Err]),
                       ok
               end
-      end).
+      end);
+handle_tick(QName, Config, _Nodes) ->
+    rabbit_log:debug("~ts: handle tick received unexpected config format ~tp",
+                     [rabbit_misc:rs(QName), Config]).
 
 repair_leader_record(Q, Self) ->
     Node = node(),
@@ -706,6 +733,21 @@ system_recover(quorum_queues) ->
         false ->
             ?INFO("rabbit not booted, skipping queue recovery", []),
             ok
+    end.
+
+maybe_apply_policies(Q, #{config := CurrentConfig}) ->
+    NewPolicyConfig = gather_policy_config(Q, false),
+
+    RelevantKeys = maps:keys(NewPolicyConfig),
+    CurrentPolicyConfig = maps:with(RelevantKeys, CurrentConfig),
+
+    ShouldUpdate = NewPolicyConfig =/= CurrentPolicyConfig,
+    case ShouldUpdate of
+        true ->
+            rabbit_log:debug("Re-applying policies to ~ts", [rabbit_misc:rs(amqqueue:get_name(Q))]),
+            policy_changed(Q),
+            ok;
+        false -> ok
     end.
 
 -spec recover(binary(), [amqqueue:amqqueue()]) ->
@@ -1307,7 +1349,7 @@ add_member(Q, Node, Membership, Timeout) when ?amqqueue_is_quorum(Q) ->
                         maps:get(id, Conf)
                 end,
             case ra:add_member(Members, ServerIdSpec, Timeout) of
-                {ok, _, Leader} ->
+                {ok, {RaIndex, RaTerm}, Leader} ->
                     Fun = fun(Q1) ->
                                   Q2 = update_type_state(
                                          Q1, fun(#{nodes := Nodes} = Ts) ->
@@ -1315,6 +1357,19 @@ add_member(Q, Node, Membership, Timeout) when ?amqqueue_is_quorum(Q) ->
                                              end),
                                   amqqueue:set_pid(Q2, Leader)
                           end,
+                    %% The `ra:member_add/3` call above returns before the
+                    %% change is committed. This is ok for that addition but
+                    %% any follow-up changes to the cluster might be rejected
+                    %% with the `cluster_change_not_permitted` error.
+                    %%
+                    %% Instead of changing other places to wait or retry their
+                    %% cluster membership change, we wait for the current add
+                    %% to be applied using a conditional leader query before
+                    %% proceeding and returning.
+                    {ok, _, _} = ra:leader_query(
+                                   Leader,
+                                   {erlang, is_list, []},
+                                   #{condition => {applied, {RaIndex, RaTerm}}}),
                     _ = rabbit_amqqueue:update(QName, Fun),
                     rabbit_log:info("Added a replica of quorum ~ts on node ~ts", [rabbit_misc:rs(QName), Node]),
                     ok;
@@ -2064,3 +2119,4 @@ file_handle_other_reservation() ->
 
 file_handle_release_reservation() ->
     ok.
+

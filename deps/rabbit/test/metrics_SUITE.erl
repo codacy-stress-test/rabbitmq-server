@@ -46,7 +46,8 @@ merge_app_env(Config) ->
     rabbit_ct_helpers:merge_app_env(Config,
                                     {rabbit, [
                                               {collect_statistics, fine},
-                                              {collect_statistics_interval, 500}
+                                              {collect_statistics_interval, 500},
+                                              {core_metrics_gc_interval, 5000}
                                              ]}).
 init_per_suite(Config) ->
     rabbit_ct_helpers:log_environment(),
@@ -186,6 +187,10 @@ queue_metric_idemp(Config, {N, R}) ->
               Queue
           end || _ <- lists:seq(1, N)],
 
+    ?awaitMatch(N, length(read_table_rpc(Config, queue_metrics)),
+                30000),
+    ?awaitMatch(N, length(read_table_rpc(Config, queue_coarse_metrics)),
+                30000),
     Table = [ Pid || {Pid, _, _} <- read_table_rpc(Config, queue_metrics)],
     Table2 = [ Pid || {Pid, _, _} <- read_table_rpc(Config, queue_coarse_metrics)],
     % refresh stats 'R' times
@@ -195,12 +200,16 @@ queue_metric_idemp(Config, {N, R}) ->
          gen_server2:call(Pid, flush)
       end|| {Pid, _, _} <- ChanTable ] || _ <- lists:seq(1, R)],
     force_metric_gc(Config),
+    ?awaitMatch(N, length(read_table_rpc(Config, queue_metrics)),
+                30000),
+    ?awaitMatch(N, length(read_table_rpc(Config, queue_coarse_metrics)),
+                30000),
     TableAfter = [ Pid || {Pid, _, _} <- read_table_rpc(Config,  queue_metrics)],
     TableAfter2 = [ Pid || {Pid, _, _} <- read_table_rpc(Config, queue_coarse_metrics)],
     [ delete_queue(Chan, Q) || Q <- Queues],
     rabbit_ct_client_helpers:close_connection(Conn),
-    (Table2 == TableAfter2) and (Table == TableAfter) and
-    (N == length(Table)) and (N == length(TableAfter)).
+    (lists:sort(Table2) == lists:sort(TableAfter2))
+        and (lists:sort(Table) == lists:sort(TableAfter)).
 
 connection_metric_count(Config, Ops) ->
     add_rem_counter(Config, Ops,
@@ -208,9 +217,11 @@ connection_metric_count(Config, Ops) ->
                      fun(Cfg) ->
                              rabbit_ct_client_helpers:close_connection(Cfg)
                      end},
-                   [ connection_created,
-                     connection_metrics,
-                     connection_coarse_metrics ]).
+                    %% connection_metrics are asynchronous,
+                    %% emitted on a timer. These have been removed
+                    %% from here as they're already tested on another
+                    %% testcases
+                    [ connection_created ]).
 
 channel_metric_count(Config, Ops) ->
     Conn =  rabbit_ct_client_helpers:open_unmanaged_connection(Config),
@@ -279,11 +290,13 @@ add_rem_counter(Config, {Initial, Ops}, {AddFun, RemFun}, Tables) ->
                     {Initial, Things},
                     Ops),
     force_metric_gc(Config),
-    TabLens = lists:map(fun(T) ->
-                                length(read_table_rpc(Config, T))
-                        end, Tables),
+    ?awaitMatch([FinalLen],
+                lists:usort(lists:map(fun(T) ->
+                                              length(read_table_rpc(Config, T))
+                                      end, Tables)),
+                45000),
     [RemFun(Thing) || Thing <- Things1],
-    [FinalLen] == lists:usort(TabLens).
+    true.
 
 
 connection(Config) ->
@@ -293,9 +306,12 @@ connection(Config) ->
     [_] = read_table_rpc(Config, connection_coarse_metrics),
     ok = rabbit_ct_client_helpers:close_connection(Conn),
     force_metric_gc(Config),
-    [] = read_table_rpc(Config, connection_created),
-    [] = read_table_rpc(Config, connection_metrics),
-    [] = read_table_rpc(Config, connection_coarse_metrics),
+    ?awaitMatch([], read_table_rpc(Config, connection_created),
+                30000),
+    ?awaitMatch([], read_table_rpc(Config, connection_metrics),
+                30000),
+    ?awaitMatch([], read_table_rpc(Config, connection_coarse_metrics),
+                30000),
     ok.
 
 channel(Config) ->

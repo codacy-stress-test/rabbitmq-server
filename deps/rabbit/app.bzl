@@ -531,10 +531,10 @@ def all_srcs(name = "all_srcs"):
             "include/amqqueue.hrl",
             "include/amqqueue_v2.hrl",
             "include/internal_user.hrl",
-            "include/khepri.hrl",
             "include/mc.hrl",
             "include/rabbit_amqp.hrl",
             "include/rabbit_global_counters.hrl",
+            "include/rabbit_khepri.hrl",
             "include/vhost.hrl",
             "include/vhost_v2.hrl",
         ],
@@ -548,6 +548,7 @@ def all_srcs(name = "all_srcs"):
         name = "private_hdrs",
         srcs = [
             "src/mirrored_supervisor.hrl",
+            "src/rabbit_amqp_reader.hrl",
             "src/rabbit_feature_flags.hrl",
             "src/rabbit_ff_registry.hrl",
             "src/rabbit_fifo.hrl",
@@ -2163,7 +2164,7 @@ def test_suite_beam_files(name = "test_suite_beam_files"):
         outs = ["test/classic_queue_SUITE.beam"],
         app_name = "rabbit",
         erlc_opts = "//:test_erlc_opts",
-        deps = ["//deps/amqp_client:erlang_app"],
+        deps = ["//deps/amqp_client:erlang_app", "//deps/rabbitmq_ct_helpers:erlang_app"],
     )
     erlang_bytecode(
         name = "rabbit_fifo_q_SUITE_beam_files",

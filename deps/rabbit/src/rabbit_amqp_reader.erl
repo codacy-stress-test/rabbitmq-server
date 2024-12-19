@@ -7,13 +7,16 @@
 
 -module(rabbit_amqp_reader).
 
+-include_lib("kernel/include/logger.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("amqp10_common/include/amqp10_types.hrl").
+-include("rabbit_amqp_reader.hrl").
 -include("rabbit_amqp.hrl").
 
 -export([init/1,
          info/2,
-         mainloop/2]).
+         mainloop/2,
+         set_credential/2]).
 
 -export([system_continue/3,
          system_terminate/4,
@@ -53,6 +56,7 @@
          channel_max :: non_neg_integer(),
          auth_mechanism :: sasl_init_unprocessed | {binary(), module()},
          auth_state :: term(),
+         credential_timer :: undefined | reference(),
          properties :: undefined | {map, list(tuple())}
         }).
 
@@ -76,7 +80,8 @@
          pending_recv :: boolean(),
          buf :: list(),
          buf_len :: non_neg_integer(),
-         tracked_channels :: #{channel_number() => Session :: pid()}
+         tracked_channels :: #{channel_number() => Session :: pid()},
+         stats_timer :: rabbit_event:state()
         }).
 
 -type state() :: #v1{}.
@@ -87,7 +92,7 @@
 
 unpack_from_0_9_1(
   {Sock, PendingRecv, SupPid, Buf, BufLen, ProxySocket,
-   ConnectionName, Host, PeerHost, Port, PeerPort, ConnectedAt},
+   ConnectionName, Host, PeerHost, Port, PeerPort, ConnectedAt, StatsTimer},
   Parent) ->
     logger:update_process_metadata(#{connection => ConnectionName}),
     #v1{parent           = Parent,
@@ -103,6 +108,7 @@ unpack_from_0_9_1(
         tracked_channels = maps:new(),
         writer           = none,
         connection_state = received_amqp3100,
+        stats_timer      = StatsTimer,
         connection = #v1_connection{
                         name = ConnectionName,
                         container_id = none,
@@ -138,6 +144,11 @@ server_properties() ->
     Props1 = [{{symbol, K}, {utf8, V}} || {K, longstr, V} <- Props0],
     Props = [{{symbol, <<"node">>}, {utf8, atom_to_binary(node())}} | Props1],
     {map, Props}.
+
+-spec set_credential(pid(), binary()) -> ok.
+set_credential(Pid, Credential) ->
+    Pid ! {set_credential, Credential},
+    ok.
 
 %%--------------------------------------------------------------------------
 
@@ -193,6 +204,10 @@ mainloop(Deb, State = #v1{sock = Sock, buf = Buf, buf_len = BufLen}) ->
             end
     end.
 
+handle_other(emit_stats, State) ->
+    emit_stats(State);
+handle_other(ensure_stats_timer, State) ->
+    ensure_stats_timer(State);
 handle_other({'EXIT', Parent, Reason}, State = #v1{parent = Parent}) ->
     ReasonString = rabbit_misc:format("broker forced connection closure with reason '~w'",
                                       [Reason]),
@@ -239,10 +254,20 @@ handle_other({'$gen_call', From, {info, Items}}, State) ->
             end,
     gen_server:reply(From, Reply),
     State;
-handle_other({'$gen_cast', {force_event_refresh, _Ref}}, State) ->
-    State;
+handle_other({'$gen_cast', {force_event_refresh, Ref}}, State) ->
+    case ?IS_RUNNING(State) of
+        true ->
+            Infos = infos(?CONNECTION_EVENT_KEYS, State),
+            rabbit_event:notify(connection_created, Infos, Ref),
+            rabbit_event:init_stats_timer(State, #v1.stats_timer);
+        false ->
+            %% Ignore, we will emit a connection_created event once we start running.
+            State
+    end;
 handle_other(terminate_connection, _State) ->
     stop;
+handle_other({set_credential, Cred}, State) ->
+    set_credential0(Cred, State);
 handle_other(credential_expired, State) ->
     Error = error_frame(?V_1_0_AMQP_ERROR_UNAUTHORIZED_ACCESS, "credential expired", []),
     handle_exception(State, 0, Error);
@@ -320,16 +345,14 @@ error_frame(Condition, Fmt, Args) ->
 
 handle_exception(State = #v1{connection_state = closed}, Channel,
                  #'v1_0.error'{description = {utf8, Desc}}) ->
-    rabbit_log_connection:error(
-      "Error on AMQP 1.0 connection ~tp (~tp), channel number ~b:~n~tp",
-      [self(), closed, Channel, Desc]),
+    ?LOG_ERROR("Error on AMQP 1.0 connection ~tp (~tp), channel number ~b:~n~tp",
+               [self(), closed, Channel, Desc]),
     State;
 handle_exception(State = #v1{connection_state = CS}, Channel,
                  Error = #'v1_0.error'{description = {utf8, Desc}})
   when ?IS_RUNNING(State) orelse CS =:= closing ->
-    rabbit_log_connection:error(
-      "Error on AMQP 1.0 connection ~tp (~tp), channel number ~b:~n~tp",
-      [self(), CS, Channel, Desc]),
+    ?LOG_ERROR("Error on AMQP 1.0 connection ~tp (~tp), channel number ~b:~n~tp",
+               [self(), CS, Channel, Desc]),
     close(Error, State);
 handle_exception(State, _Channel, Error) ->
     silent_close_delay(),
@@ -416,21 +439,23 @@ handle_connection_frame(
                                   },
       helper_sup = HelperSupPid,
       sock = Sock} = State0) ->
-    logger:update_process_metadata(#{amqp_container => ContainerId}),
     Vhost = vhost(Hostname),
+    logger:update_process_metadata(#{amqp_container => ContainerId,
+                                     vhost => Vhost,
+                                     user => Username}),
     ok = check_user_loopback(State0),
     ok = check_vhost_exists(Vhost, State0),
     ok = check_vhost_alive(Vhost),
     ok = rabbit_access_control:check_vhost_access(User, Vhost, {socket, Sock}, #{}),
     ok = check_vhost_connection_limit(Vhost, Username),
     ok = check_user_connection_limit(Username),
-    ok = ensure_credential_expiry_timer(User),
+    Timer = maybe_start_credential_expiry_timer(User),
     rabbit_core_metrics:auth_attempt_succeeded(<<>>, Username, amqp10),
     notify_auth(user_authentication_success, Username, State0),
-    rabbit_log_connection:info(
-      "Connection from AMQP 1.0 container '~ts': user '~ts' authenticated "
-      "using SASL mechanism ~s and granted access to vhost '~ts'",
-      [ContainerId, Username, Mechanism, Vhost]),
+    ?LOG_INFO(
+       "Connection from AMQP 1.0 container '~ts': user '~ts' authenticated "
+       "using SASL mechanism ~s and granted access to vhost '~ts'",
+       [ContainerId, Username, Mechanism, Vhost]),
 
     OutgoingMaxFrameSize = case ClientMaxFrame of
                                undefined ->
@@ -499,7 +524,8 @@ handle_connection_frame(
                                       outgoing_max_frame_size = OutgoingMaxFrameSize,
                                       channel_max = EffectiveChannelMax,
                                       properties = Properties,
-                                      timeout = ReceiveTimeoutMillis},
+                                      timeout = ReceiveTimeoutMillis,
+                                      credential_timer = Timer},
                        heartbeater = Heartbeater},
     State = start_writer(State1),
     HostnameVal = case Hostname of
@@ -507,15 +533,16 @@ handle_connection_frame(
                       null -> undefined;
                       {utf8, Val} -> Val
                   end,
-    rabbit_log:debug(
-      "AMQP 1.0 connection.open frame: hostname = ~ts, extracted vhost = ~ts, idle-time-out = ~p",
-      [HostnameVal, Vhost, IdleTimeout]),
+    ?LOG_DEBUG(
+       "AMQP 1.0 connection.open frame: hostname = ~ts, extracted vhost = ~ts, idle-time-out = ~p",
+       [HostnameVal, Vhost, IdleTimeout]),
 
     Infos = infos(?CONNECTION_EVENT_KEYS, State),
     ok = rabbit_core_metrics:connection_created(
            proplists:get_value(pid, Infos),
            Infos),
     ok = rabbit_event:notify(connection_created, Infos),
+    ok = maybe_emit_stats(State),
     ok = rabbit_amqp1_0:register_connection(self()),
     Caps = [%% https://docs.oasis-open.org/amqp/linkpair/v1.0/cs01/linkpair-v1.0-cs01.html#_Toc51331306
             <<"LINK_PAIR_V1_0">>,
@@ -618,25 +645,26 @@ handle_input(handshake,
     switch_callback(State, {frame_header, amqp}, 8);
 handle_input({frame_header, Mode},
              Header = <<Size:32, DOff:8, Type:8, Channel:16>>,
-             State) when DOff >= 2 ->
+             State0) when DOff >= 2 ->
     case {Mode, Type} of
         {amqp, 0} -> ok;
         {sasl, 1} -> ok;
-        _         -> throw({bad_1_0_header_type, Header, Mode})
+        _ -> throw({bad_1_0_header_type, Header, Mode})
     end,
-    MaxFrameSize = State#v1.connection#v1_connection.incoming_max_frame_size,
-    if Size =:= 8 ->
-           %% heartbeat
-           State;
-       Size > MaxFrameSize ->
-           handle_exception(
-             State, Channel, error_frame(
-                               ?V_1_0_CONNECTION_ERROR_FRAMING_ERROR,
-                               "frame size (~b bytes) > maximum frame size (~b bytes)",
-                               [Size, MaxFrameSize]));
-       true ->
-           switch_callback(State, {frame_body, Mode, DOff, Channel}, Size - 8)
-    end;
+    MaxFrameSize = State0#v1.connection#v1_connection.incoming_max_frame_size,
+    State = if Size =:= 8 ->
+                   %% heartbeat
+                   State0;
+               Size > MaxFrameSize ->
+                   Err = error_frame(
+                           ?V_1_0_CONNECTION_ERROR_FRAMING_ERROR,
+                           "frame size (~b bytes) > maximum frame size (~b bytes)",
+                           [Size, MaxFrameSize]),
+                   handle_exception(State0, Channel, Err);
+               true ->
+                   switch_callback(State0, {frame_body, Mode, DOff, Channel}, Size - 8)
+            end,
+    ensure_stats_timer(State);
 handle_input({frame_header, _Mode}, Malformed, _State) ->
     throw({bad_1_0_header, Malformed});
 handle_input({frame_body, Mode, DOff, Channel},
@@ -768,16 +796,16 @@ notify_auth(EventType, Username, State) ->
     rabbit_event:notify(EventType, EventProps).
 
 track_channel(ChannelNum, SessionPid, #v1{tracked_channels = Channels} = State) ->
-    rabbit_log:debug("AMQP 1.0 created session process ~p for channel number ~b",
-                     [SessionPid, ChannelNum]),
+    ?LOG_DEBUG("AMQP 1.0 created session process ~p for channel number ~b",
+               [SessionPid, ChannelNum]),
     _Ref = erlang:monitor(process, SessionPid, [{tag, {'DOWN', ChannelNum}}]),
     State#v1{tracked_channels = maps:put(ChannelNum, SessionPid, Channels)}.
 
 untrack_channel(ChannelNum, SessionPid, #v1{tracked_channels = Channels0} = State) ->
     case maps:take(ChannelNum, Channels0) of
         {SessionPid, Channels} ->
-            rabbit_log:debug("AMQP 1.0 closed session process ~p with channel number ~b",
-                             [SessionPid, ChannelNum]),
+            ?LOG_DEBUG("AMQP 1.0 closed session process ~p with channel number ~b",
+                       [SessionPid, ChannelNum]),
             State#v1{tracked_channels = Channels};
         _ ->
             State
@@ -871,39 +899,57 @@ check_user_connection_limit(Username) ->
     end.
 
 
-%% TODO Provide a means for the client to refresh the credential.
-%% This could be either via:
-%% 1. SASL (if multiple authentications are allowed on the same AMQP 1.0 connection), see
-%%    https://datatracker.ietf.org/doc/html/rfc4422#section-3.8 , or
-%% 2. Claims Based Security (CBS) extension, see https://docs.oasis-open.org/amqp/amqp-cbs/v1.0/csd01/amqp-cbs-v1.0-csd01.html
-%%    and https://github.com/rabbitmq/rabbitmq-server/issues/9259
-%% 3. Simpler variation of 2. where a token is put to a special /token node.
-%%
-%% If the user does not refresh their credential on time (the only implementation currently),
-%% close the entire connection as we must assume that vhost access could have been revoked.
-%%
-%% If the user refreshes their credential on time (to be implemented), the AMQP reader should
-%% 1. rabbit_access_control:check_vhost_access/4
-%% 2. send a message to all its sessions which should then erase the permission caches and
-%% re-check all link permissions (i.e. whether reading / writing to exchanges / queues is still allowed).
-%% 3. cancel the current timer, and set a new timer
-%% similary as done for Stream connections, see https://github.com/rabbitmq/rabbitmq-server/issues/10292
-ensure_credential_expiry_timer(User) ->
+set_credential0(Cred,
+                State = #v1{connection = #v1_connection{
+                                            user = User0,
+                                            vhost = Vhost,
+                                            credential_timer = OldTimer} = Conn,
+                            tracked_channels = Chans,
+                            sock = Sock}) ->
+    ?LOG_INFO("updating credential", []),
+    case rabbit_access_control:update_state(User0, Cred) of
+        {ok, User} ->
+            try rabbit_access_control:check_vhost_access(User, Vhost, {socket, Sock}, #{}) of
+                ok ->
+                    maps:foreach(fun(_ChanNum, Pid) ->
+                                         rabbit_amqp_session:reset_authz(Pid, User)
+                                 end, Chans),
+                    case OldTimer of
+                        undefined -> ok;
+                        Ref -> ok = erlang:cancel_timer(Ref, [{info, false}])
+                    end,
+                    NewTimer = maybe_start_credential_expiry_timer(User),
+                    State#v1{connection = Conn#v1_connection{
+                                            user = User,
+                                            credential_timer = NewTimer}}
+            catch _:Reason ->
+                      Error = error_frame(?V_1_0_AMQP_ERROR_UNAUTHORIZED_ACCESS,
+                                          "access to vhost ~s failed for new credential: ~p",
+                                          [Vhost, Reason]),
+                      handle_exception(State, 0, Error)
+            end;
+        Err ->
+            Error = error_frame(?V_1_0_AMQP_ERROR_UNAUTHORIZED_ACCESS,
+                                "credential update failed: ~p",
+                                [Err]),
+            handle_exception(State, 0, Error)
+    end.
+
+maybe_start_credential_expiry_timer(User) ->
     case rabbit_access_control:expiry_timestamp(User) of
         never ->
-            ok;
+            undefined;
         Ts when is_integer(Ts) ->
             Time = (Ts - os:system_time(second)) * 1000,
-            rabbit_log:debug(
-              "Credential expires in ~b ms frow now (absolute timestamp = ~b seconds since epoch)",
-              [Time, Ts]),
+            ?LOG_DEBUG(
+               "credential expires in ~b ms frow now (absolute timestamp = ~b seconds since epoch)",
+               [Time, Ts]),
             case Time > 0 of
                 true ->
-                    _TimerRef = erlang:send_after(Time, self(), credential_expired),
-                    ok;
+                    erlang:send_after(Time, self(), credential_expired);
                 false ->
                     protocol_error(?V_1_0_AMQP_ERROR_UNAUTHORIZED_ACCESS,
-                                   "Credential expired ~b ms ago", [abs(Time)])
+                                   "credential expired ~b ms ago", [abs(Time)])
             end
     end.
 
@@ -921,7 +967,8 @@ silent_close_delay() ->
 -spec info(rabbit_types:connection(), rabbit_types:info_keys()) ->
     rabbit_types:infos().
 info(Pid, InfoItems) ->
-    case InfoItems -- ?INFO_ITEMS of
+    KnownItems = [session_pids | ?INFO_ITEMS],
+    case InfoItems -- KnownItems of
         [] ->
             case gen_server:call(Pid, {info, InfoItems}, infinity) of
                 {ok, InfoList} ->
@@ -984,13 +1031,18 @@ i(peer_host, #v1{connection = #v1_connection{peer_host = Val}}) ->
     Val;
 i(peer_port, #v1{connection = #v1_connection{peer_port = Val}}) ->
     Val;
-i(SockStat, S) when SockStat =:= recv_oct;
-                    SockStat =:= recv_cnt;
-                    SockStat =:= send_oct;
-                    SockStat =:= send_cnt;
-                    SockStat =:= send_pend ->
-    socket_info(fun (Sock) -> rabbit_net:getstat(Sock, [SockStat]) end,
-                fun ([{_, I}]) -> I end, S);
+i(SockStat, #v1{sock = Sock})
+  when SockStat =:= recv_oct;
+       SockStat =:= recv_cnt;
+       SockStat =:= send_oct;
+       SockStat =:= send_cnt;
+       SockStat =:= send_pend ->
+    case rabbit_net:getstat(Sock, [SockStat]) of
+        {ok, [{SockStat, Val}]} ->
+            Val;
+        {error, _} ->
+            ''
+    end;
 i(ssl, #v1{sock = Sock}) -> rabbit_net:is_ssl(Sock);
 i(SSL, #v1{sock = Sock, proxy_socket = ProxySock})
   when SSL =:= ssl_protocol;
@@ -1014,17 +1066,41 @@ i(client_properties, #v1{connection = #v1_connection{properties = Props}}) ->
     end;
 i(channels, #v1{tracked_channels = Channels}) ->
     maps:size(Channels);
+i(session_pids, #v1{tracked_channels = Map}) ->
+    maps:values(Map);
 i(channel_max, #v1{connection = #v1_connection{channel_max = Max}}) ->
     Max;
+i(reductions = Item, _State) ->
+    {Item, Reductions} = erlang:process_info(self(), Item),
+    Reductions;
+i(garbage_collection, _State) ->
+    rabbit_misc:get_gc_info(self());
 i(Item, #v1{}) ->
     throw({bad_argument, Item}).
 
-%% From rabbit_reader
-socket_info(Get, Select, #v1{sock = Sock}) ->
-    case Get(Sock) of
-        {ok,    T} -> Select(T);
-        {error, _} -> ''
-    end.
+maybe_emit_stats(State) ->
+    ok = rabbit_event:if_enabled(
+           State,
+           #v1.stats_timer,
+           fun() -> emit_stats(State) end).
+
+emit_stats(State) ->
+    [{_, Pid},
+     {_, RecvOct},
+     {_, SendOct},
+     {_, Reductions}] = infos(?SIMPLE_METRICS, State),
+    Infos = infos(?OTHER_METRICS, State),
+    rabbit_core_metrics:connection_stats(Pid, Infos),
+    rabbit_core_metrics:connection_stats(Pid, RecvOct, SendOct, Reductions),
+    %% NB: Don't call ensure_stats_timer because it becomes expensive
+    %% if all idle non-hibernating connections emit stats.
+    rabbit_event:reset_stats_timer(State, #v1.stats_timer).
+
+ensure_stats_timer(State)
+  when ?IS_RUNNING(State) ->
+    rabbit_event:ensure_stats_timer(State, #v1.stats_timer, emit_stats);
+ensure_stats_timer(State) ->
+    State.
 
 ignore_maintenance({map, Properties}) ->
     lists:member(

@@ -56,7 +56,7 @@ bazel_dep(
 
 bazel_dep(
     name = "rabbitmq_osiris",
-    version = "1.8.3",
+    version = "1.8.5",
     repo_name = "osiris",
 )
 
@@ -189,8 +189,8 @@ erlang_package.hex_package(
 erlang_package.hex_package(
     name = "horus",
     build_file = "@rabbitmq-server//bazel:BUILD.horus",
-    sha256 = "4ebcb0ce86c8ee411d24b289c504b14431ee004d9f2c48e6f88d4128ded33a2e",
-    version = "0.2.6",
+    sha256 = "d564d30ebc274f0d92c3d44a336d0b892f000be159912ae4e6838701e85495ec",
+    version = "0.3.1",
 )
 
 erlang_package.hex_package(
@@ -217,15 +217,15 @@ erlang_package.hex_package(
 erlang_package.hex_package(
     name = "khepri_mnesia_migration",
     build_file = "@rabbitmq-server//bazel:BUILD.khepri_mnesia_migration",
-    sha256 = "950e46306f8e9a91a5dbf1f7e465dc251bdbc7737809ebf2c493f4058983d87c",
-    version = "0.7.0",
+    sha256 = "24b87e51b9e46eaeeadb898720e12a58d501cbb05c16e28ca27063e66d60e85c",
+    version = "0.7.1",
 )
 
 erlang_package.hex_package(
     name = "thoas",
     build_file = "@rabbitmq-server//bazel:BUILD.thoas",
-    sha256 = "fc763185b932ecb32a554fb735ee03c3b6b1b31366077a2427d2a97f3bd26735",
-    version = "1.0.0",
+    sha256 = "e38697edffd6e91bd12cea41b155115282630075c2a727e7a6b2947f5408b86a",
+    version = "1.2.1",
 )
 
 erlang_package.hex_package(

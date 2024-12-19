@@ -656,9 +656,11 @@ gen_msg() ->
     gen_msg(1024 * 1024).
 
 gen_msg(MaxSize) ->
-    %% This might generate false positives but very rarely
-    %% so we don't do anything to prevent them.
-    rand:bytes(rand:uniform(MaxSize)).
+    Bytes = rand:bytes(rand:uniform(MaxSize)),
+    %% We remove 255 to avoid false positives. In a running
+    %% rabbit node we will not get false positives because
+    %% we also check messages against the index.
+    << <<case B of 255 -> 254; _ -> B end>> || <<B>> <= Bytes >>.
 
 gen_msg_file(Config, Blocks) ->
     PrivDir = ?config(priv_dir, Config),
@@ -668,8 +670,8 @@ gen_msg_file(Config, Blocks) ->
         {bin, Bin} ->
             Bin;
         {pad, Size} ->
-            %% This might generate false positives although very unlikely.
-            rand:bytes(Size);
+            %% Empty space between messages is expected to be zeroes.
+            <<0:Size/unit:8>>;
         {msg, MsgId, Msg} ->
             Size = 16 + byte_size(Msg),
             [<<Size:64>>, MsgId, Msg, <<255>>]
@@ -1050,7 +1052,7 @@ bq_queue_recover1(Config) ->
     exit(QPid, kill),
     MRef = erlang:monitor(process, QPid),
     receive {'DOWN', MRef, process, QPid, _Info} -> ok
-    after 10000 -> exit(timeout_waiting_for_queue_death)
+    after ?TIMEOUT -> exit(timeout_waiting_for_queue_death)
     end,
     rabbit_amqqueue:stop(?VHOST),
     {Recovered, []} = rabbit_amqqueue:recover(?VHOST),

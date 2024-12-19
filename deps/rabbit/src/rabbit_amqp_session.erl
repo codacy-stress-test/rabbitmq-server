@@ -11,6 +11,7 @@
 
 -behaviour(gen_server).
 
+-include_lib("kernel/include/logger.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("amqp10_common/include/amqp10_types.hrl").
 -include("rabbit_amqp.hrl").
@@ -90,7 +91,9 @@
          list_local/0,
          conserve_resources/3,
          check_resource_access/4,
-         check_read_permitted_on_topic/4
+         check_read_permitted_on_topic/4,
+         reset_authz/2,
+         info/1
         ]).
 
 -export([init/1,
@@ -146,7 +149,9 @@
          }).
 
 -record(incoming_link, {
+          name :: binary(),
           snd_settle_mode :: snd_settle_mode(),
+          target_address :: null | binary(),
           %% The exchange is either defined in the ATTACH frame and static for
           %% the life time of the link or dynamically provided in each message's
           %% "to" field (address v2).
@@ -195,6 +200,8 @@
          }).
 
 -record(outgoing_link, {
+          name :: binary(),
+          source_address :: binary(),
           %% Although the source address of a link might be an exchange name and binding key
           %% or a topic filter, an outgoing link will always consume from a queue.
           queue_name :: rabbit_amqqueue:name(),
@@ -393,6 +400,10 @@ init({ReaderPid, WriterPid, ChannelNum, MaxFrameSize, User, Vhost, ConnName,
          handle_max = ClientHandleMax}}) ->
     process_flag(trap_exit, true),
     rabbit_process_flag:adjust_for_message_handling_proc(),
+    logger:update_process_metadata(#{channel_number => ChannelNum,
+                                     connection => ConnName,
+                                     vhost => Vhost,
+                                     user => User#user.username}),
 
     ok = pg:join(pg_scope(), self(), self()),
     Alarms0 = rabbit_alarm:register(self(), {?MODULE, conserve_resources, []}),
@@ -480,6 +491,12 @@ list_local() ->
 conserve_resources(Pid, Source, {_, Conserve, _}) ->
     gen_server:cast(Pid, {conserve_resources, Source, Conserve}).
 
+-spec reset_authz(pid(), rabbit_types:user()) -> ok.
+reset_authz(Pid, User) ->
+    gen_server:cast(Pid, {reset_authz, User}).
+
+handle_call(infos, _From, State) ->
+    reply(infos(State), State);
 handle_call(Msg, _From, State) ->
     Reply = {error, {not_understood, Msg}},
     reply(Reply, State).
@@ -574,15 +591,26 @@ handle_cast({conserve_resources, Alarm, Conserve},
     noreply(State);
 handle_cast(refresh_config, #state{cfg = #cfg{vhost = Vhost} = Cfg} = State0) ->
     State = State0#state{cfg = Cfg#cfg{trace_state = rabbit_trace:init(Vhost)}},
-    noreply(State).
+    noreply(State);
+handle_cast({reset_authz, User}, #state{cfg = Cfg} = State0) ->
+    State1 = State0#state{
+               permission_cache = [],
+               topic_permission_cache = [],
+               cfg = Cfg#cfg{user = User}},
+    try recheck_authz(State1) of
+        State ->
+            noreply(State)
+    catch exit:#'v1_0.error'{} = Error ->
+              log_error_and_close_session(Error, State1)
+    end.
 
 log_error_and_close_session(
   Error, State = #state{cfg = #cfg{reader_pid = ReaderPid,
                                    writer_pid = WriterPid,
                                    channel_num = Ch}}) ->
     End = #'v1_0.end'{error = Error},
-    rabbit_log:warning("Closing session for connection ~p: ~tp",
-                       [ReaderPid, Error]),
+    ?LOG_WARNING("Closing session for connection ~p: ~tp",
+                 [ReaderPid, Error]),
     ok = rabbit_amqp_writer:send_command_sync(WriterPid, Ch, End),
     {stop, {shutdown, Error}, State}.
 
@@ -869,8 +897,8 @@ destroy_outgoing_link(_, _, _, Acc) ->
     Acc.
 
 detach(Handle, Link, Error = #'v1_0.error'{}) ->
-    rabbit_log:warning("Detaching link handle ~b due to error: ~tp",
-                       [Handle, Error]),
+    ?LOG_WARNING("Detaching link handle ~b due to error: ~tp",
+                 [Handle, Error]),
     publisher_or_consumer_deleted(Link),
     #'v1_0.detach'{handle = ?UINT(Handle),
                    closed = true,
@@ -961,8 +989,8 @@ handle_frame(#'v1_0.flow'{handle = Handle} = Flow,
                                 %% "If set to a handle that is not currently associated with
                                 %% an attached link, the recipient MUST respond by ending the
                                 %% session with an unattached-handle session error." [2.7.4]
-                                rabbit_log:warning(
-                                  "Received Flow frame for unknown link handle: ~tp", [Flow]),
+                                ?LOG_WARNING("Received Flow frame for unknown link handle: ~tp",
+                                             [Flow]),
                                 protocol_error(
                                   ?V_1_0_SESSION_ERROR_UNATTACHED_HANDLE,
                                   "Unattached link handle: ~b", [HandleInt])
@@ -1241,11 +1269,11 @@ handle_attach(#'v1_0.attach'{
     reply_frames([Reply], State);
 
 handle_attach(#'v1_0.attach'{role = ?AMQP_ROLE_SENDER,
-                             name = LinkName,
+                             name = LinkName = {utf8, LinkName0},
                              handle = Handle = ?UINT(HandleInt),
                              source = Source,
                              snd_settle_mode = MaybeSndSettleMode,
-                             target = Target,
+                             target = Target = #'v1_0.target'{address = TargetAddress},
                              initial_delivery_count = DeliveryCount = ?UINT(DeliveryCountInt)
                             },
               State0 = #state{incoming_links = IncomingLinks0,
@@ -1258,7 +1286,9 @@ handle_attach(#'v1_0.attach'{role = ?AMQP_ROLE_SENDER,
             SndSettleMode = snd_settle_mode(MaybeSndSettleMode),
             MaxMessageSize = persistent_term:get(max_message_size),
             IncomingLink = #incoming_link{
+                              name = LinkName0,
                               snd_settle_mode = SndSettleMode,
+                              target_address = address(TargetAddress),
                               exchange = Exchange,
                               routing_key = RoutingKey,
                               queue_name_bin = QNameBin,
@@ -1295,9 +1325,10 @@ handle_attach(#'v1_0.attach'{role = ?AMQP_ROLE_SENDER,
     end;
 
 handle_attach(#'v1_0.attach'{role = ?AMQP_ROLE_RECEIVER,
-                             name = LinkName,
+                             name = LinkName = {utf8, LinkName0},
                              handle = Handle = ?UINT(HandleInt),
-                             source = Source = #'v1_0.source'{filter = DesiredFilter},
+                             source = Source = #'v1_0.source'{address = SourceAddress,
+                                                              filter = DesiredFilter},
                              snd_settle_mode = SndSettleMode,
                              rcv_settle_mode = RcvSettleMode,
                              max_message_size = MaybeMaxMessageSize,
@@ -1410,6 +1441,8 @@ handle_attach(#'v1_0.attach'{role = ?AMQP_ROLE_RECEIVER,
                                           offered_capabilities = OfferedCaps},
                                    MaxMessageSize = max_message_size(MaybeMaxMessageSize),
                                    Link = #outgoing_link{
+                                             name = LinkName0,
+                                             source_address = address(SourceAddress),
                                              queue_name = queue_resource(Vhost, QNameBin),
                                              queue_type = QType,
                                              send_settled = SndSettled,
@@ -1970,7 +2003,10 @@ session_flow_fields(Frames, State)
 session_flow_fields(Flow = #'v1_0.flow'{},
                     #state{next_outgoing_id = NextOutgoingId,
                            next_incoming_id = NextIncomingId,
-                           incoming_window = IncomingWindow}) ->
+                           incoming_window = IncomingWindow0}) ->
+    %% IncomingWindow0 can be negative when the sending client overshoots our window.
+    %% However, we must set a floor of 0 in the FLOW frame because field incoming-window is an uint.
+    IncomingWindow = max(0, IncomingWindow0),
     Flow#'v1_0.flow'{
            next_outgoing_id = ?UINT(NextOutgoingId),
            outgoing_window = ?UINT_OUTGOING_WINDOW,
@@ -2141,9 +2177,9 @@ handle_deliver(ConsumerTag, AckRequired,
                         outgoing_links = OutgoingLinks};
         _ ->
             %% TODO handle missing link -- why does the queue think it's there?
-            rabbit_log:warning(
-              "No link handle ~b exists for delivery with consumer tag ~p from queue ~tp",
-              [Handle, ConsumerTag, QName]),
+            ?LOG_WARNING(
+               "No link handle ~b exists for delivery with consumer tag ~p from queue ~tp",
+               [Handle, ConsumerTag, QName]),
             State
     end.
 
@@ -2651,6 +2687,11 @@ ensure_source_v1(Address,
             Err
     end.
 
+address(undefined) ->
+    null;
+address({utf8, String}) ->
+    String.
+
 -spec ensure_target(#'v1_0.target'{},
                     rabbit_types:vhost(),
                     rabbit_types:user(),
@@ -2988,7 +3029,7 @@ credit_reply_timeout(QType, QName) ->
     Fmt = "Timed out waiting for credit reply from ~s ~s. "
     "Hint: Enable feature flag rabbitmq_4.0.0",
     Args = [QType, rabbit_misc:rs(QName)],
-    rabbit_log:error(Fmt, Args),
+    ?LOG_ERROR(Fmt, Args),
     protocol_error(?V_1_0_AMQP_ERROR_INTERNAL_ERROR, Fmt, Args).
 
 default(undefined, Default) -> Default;
@@ -3522,6 +3563,29 @@ check_topic_authorisation(#exchange{type = topic,
 check_topic_authorisation(_, _, _, _, Cache) ->
     Cache.
 
+recheck_authz(#state{incoming_links = IncomingLinks,
+                     outgoing_links = OutgoingLinks,
+                     permission_cache = Cache0,
+                     cfg = #cfg{user = User}
+                    } = State) ->
+    ?LOG_DEBUG("rechecking link authorizations", []),
+    Cache1 = maps:fold(
+               fun(_Handle, #incoming_link{exchange = X}, Cache) ->
+                       case X of
+                           #exchange{name = XName} ->
+                               check_resource_access(XName, write, User, Cache);
+                           #resource{} = XName ->
+                               check_resource_access(XName, write, User, Cache);
+                           to ->
+                               Cache
+                       end
+               end, Cache0, IncomingLinks),
+    Cache2 = maps:fold(
+               fun(_Handle, #outgoing_link{queue_name = QName}, Cache) ->
+                       check_resource_access(QName, read, User, Cache)
+               end, Cache1, OutgoingLinks),
+    State#state{permission_cache = Cache2}.
+
 check_user_id(Mc, User) ->
     case rabbit_access_control:check_user_id(Mc, User) of
         ok ->
@@ -3658,6 +3722,118 @@ format_status(
               topic_permission_cache => TopicPermissionCache},
     maps:update(state, State, Status).
 
+-spec info(pid()) ->
+    {ok, rabbit_types:infos()} | {error, term()}.
+info(Pid) ->
+    try gen_server:call(Pid, infos) of
+        Infos ->
+            {ok, Infos}
+    catch _:Reason ->
+              {error, Reason}
+    end.
+
+infos(#state{cfg = #cfg{channel_num = ChannelNum,
+                        max_handle = MaxHandle},
+             next_incoming_id = NextIncomingId,
+             incoming_window = IncomingWindow,
+             next_outgoing_id = NextOutgoingId,
+             remote_incoming_window = RemoteIncomingWindow,
+             remote_outgoing_window = RemoteOutgoingWindow,
+             outgoing_unsettled_map = OutgoingUnsettledMap,
+             incoming_links = IncomingLinks,
+             outgoing_links = OutgoingLinks,
+             incoming_management_links = IncomingManagementLinks,
+             outgoing_management_links = OutgoingManagementLinks
+            }) ->
+    [
+     {channel_number, ChannelNum},
+     {handle_max, MaxHandle},
+     {next_incoming_id, NextIncomingId},
+     {incoming_window, IncomingWindow},
+     {next_outgoing_id, NextOutgoingId},
+     {remote_incoming_window, RemoteIncomingWindow},
+     {remote_outgoing_window, RemoteOutgoingWindow},
+     {outgoing_unsettled_deliveries, maps:size(OutgoingUnsettledMap)},
+     {incoming_links,
+      info_incoming_management_links(IncomingManagementLinks) ++
+      info_incoming_links(IncomingLinks)},
+     {outgoing_links,
+      info_outgoing_management_links(OutgoingManagementLinks) ++
+      info_outgoing_links(OutgoingLinks)}
+    ].
+
+info_incoming_management_links(Links) ->
+    [info_incoming_link(Handle, Name, settled, ?MANAGEMENT_NODE_ADDRESS,
+                        MaxMessageSize, DeliveryCount, Credit, 0)
+     || Handle := #management_link{
+                     name = Name,
+                     max_message_size = MaxMessageSize,
+                     delivery_count = DeliveryCount,
+                     credit = Credit} <- Links].
+
+info_incoming_links(Links) ->
+    [info_incoming_link(Handle, Name, SndSettleMode, TargetAddress, MaxMessageSize,
+                        DeliveryCount, Credit, maps:size(IncomingUnconfirmedMap))
+     || Handle := #incoming_link{
+                     name = Name,
+                     snd_settle_mode = SndSettleMode,
+                     target_address = TargetAddress,
+                     max_message_size = MaxMessageSize,
+                     delivery_count = DeliveryCount,
+                     credit = Credit,
+                     incoming_unconfirmed_map = IncomingUnconfirmedMap} <- Links].
+
+info_incoming_link(Handle, LinkName, SndSettleMode, TargetAddress,
+                   MaxMessageSize, DeliveryCount, Credit, UnconfirmedMessages) ->
+    [{handle, Handle},
+     {link_name, LinkName},
+     {snd_settle_mode, SndSettleMode},
+     {target_address, TargetAddress},
+     {max_message_size, MaxMessageSize},
+     {delivery_count, DeliveryCount},
+     {credit, Credit},
+     {unconfirmed_messages, UnconfirmedMessages}].
+
+info_outgoing_management_links(Links) ->
+    [info_outgoing_link(Handle, Name, ?MANAGEMENT_NODE_ADDRESS, <<>>,
+                        true, MaxMessageSize, DeliveryCount, Credit)
+     || Handle := #management_link{
+                     name = Name,
+                     max_message_size = MaxMessageSize,
+                     delivery_count = DeliveryCount,
+                     credit = Credit} <- Links].
+
+info_outgoing_links(Links) ->
+    [begin
+         {DeliveryCount, Credit} = case ClientFlowCtl of
+                                       #client_flow_ctl{delivery_count = DC,
+                                                        credit = C} ->
+                                           {DC, C};
+                                       credit_api_v1 ->
+                                           {'', ''}
+                                   end,
+         info_outgoing_link(Handle, Name, SourceAddress, QueueName#resource.name,
+                            SendSettled, MaxMessageSize, DeliveryCount, Credit)
+
+     end
+     || Handle := #outgoing_link{
+                     name = Name,
+                     source_address = SourceAddress,
+                     queue_name = QueueName,
+                     max_message_size = MaxMessageSize,
+                     send_settled = SendSettled,
+                     client_flow_ctl = ClientFlowCtl} <- Links].
+
+info_outgoing_link(Handle, LinkName, SourceAddress, QueueNameBin, SendSettled,
+                   MaxMessageSize, DeliveryCount, Credit) ->
+    [{handle, Handle},
+     {link_name, LinkName},
+     {source_address, SourceAddress},
+     {queue_name, QueueNameBin},
+     {send_settled, SendSettled},
+     {max_message_size, MaxMessageSize},
+     {delivery_count, DeliveryCount},
+     {credit, Credit}].
 
 unwrap_simple_type(V = {list, _}) ->
     V;

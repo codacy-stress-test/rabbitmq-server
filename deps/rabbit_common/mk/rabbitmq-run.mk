@@ -19,7 +19,7 @@ TEST_TMPDIR ?= $(TMPDIR)/rabbitmq-test-instances
 endif
 
 # Location of the scripts controlling the broker.
-RABBITMQ_SCRIPTS_DIR ?= $(CURDIR)/sbin
+RABBITMQ_SCRIPTS_DIR ?= $(CLI_SCRIPTS_DIR)
 
 ifeq ($(PLATFORM),msys2)
 RABBITMQ_PLUGINS ?= $(RABBITMQ_SCRIPTS_DIR)/rabbitmq-plugins.bat
@@ -39,7 +39,7 @@ export RABBITMQ_SCRIPTS_DIR RABBITMQCTL RABBITMQ_PLUGINS RABBITMQ_SERVER RABBITM
 export MAKE
 
 # We need to pass the location of codegen to the Java client ant
-# process.
+# process. @todo Delete?
 CODEGEN_DIR = $(DEPS_DIR)/rabbitmq_codegen
 PYTHONPATH = $(CODEGEN_DIR)
 export PYTHONPATH
@@ -90,7 +90,7 @@ ifdef PLUGINS_FROM_DEPS_DIR
 RMQ_PLUGINS_DIR = $(DEPS_DIR)
 DIST_ERL_LIBS = $(ERL_LIBS)
 else
-RMQ_PLUGINS_DIR = $(CURDIR)/$(DIST_DIR)
+RMQ_PLUGINS_DIR = $(DIST_DIR)
 # We do not want to add apps/ or deps/ to ERL_LIBS
 # when running the release from dist. The `plugins`
 # directory is added to ERL_LIBS by rabbitmq-env.
@@ -305,7 +305,7 @@ REDIRECT_STDIO = > $(RABBITMQ_LOG_BASE)/startup_log \
 		 2> $(RABBITMQ_LOG_BASE)/startup_err
 endif
 
-RMQCTL_WAIT_TIMEOUT ?= 60
+RMQCTL_WAIT_TIMEOUT ?= 60000
 
 start-background-node: node-tmpdir $(DIST_TARGET)
 	$(BASIC_SCRIPT_ENV_SETTINGS) \
@@ -422,7 +422,8 @@ restart-cluster:
 		  -rabbitmq_web_stomp_examples listener [{port,$$((61633 + $$n - 1))}] \
 		  -rabbitmq_prometheus tcp_config [{port,$$((15692 + $$n - 1))}] \
 		  -rabbitmq_stream tcp_listeners [$$((5552 + $$n - 1))] \
-		  " & \
+		  "; \
+		  $(RABBITMQCTL) -n "$$nodename" await_online_nodes $(NODES) || exit 1; \
 	done; \
 	wait
 

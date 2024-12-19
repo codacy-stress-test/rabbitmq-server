@@ -13,6 +13,8 @@
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include("amqqueue.hrl").
 
+-include("include/rabbit_khepri.hrl").
+
 -export([
          get/1,
          get_many/1,
@@ -46,7 +48,8 @@
 
 %% Used by on_node_up and on_node_down.
 %% Can be deleted once transient entities/mnesia are removed.
--export([foreach_transient/1,
+-export([list_transient/0,
+         foreach_transient/1,
          delete_transient/1]).
 
 %% Only used by rabbit_amqqueue:forget_node_for_queue, which is only called
@@ -966,6 +969,40 @@ set_in_khepri(Q) ->
     rabbit_khepri:put(Path, Q).
 
 %% -------------------------------------------------------------------
+%% list_transient().
+%% -------------------------------------------------------------------
+
+-spec list_transient() -> {ok, Queues} | {error, any()} when
+      Queues :: [amqqueue:amqqueue()].
+%% @doc Applies `UpdateFun' to all transient queue records.
+%%
+%% @private
+
+list_transient() ->
+    rabbit_khepri:handle_fallback(
+      #{mnesia => fun() -> list_transient_in_mnesia() end,
+        khepri => fun() -> list_transient_in_khepri() end
+       }).
+
+list_transient_in_mnesia() ->
+    Pattern = amqqueue:pattern_match_on_durable(false),
+    AllQueues = mnesia:dirty_match_object(
+                  ?MNESIA_TABLE,
+                  Pattern),
+    {ok, AllQueues}.
+
+list_transient_in_khepri() ->
+    try
+        List = ets:match_object(
+                 ?KHEPRI_PROJECTION,
+                 amqqueue:pattern_match_on_durable(false)),
+        {ok, List}
+    catch
+        error:badarg ->
+            {error, {khepri_projection_missing, ?KHEPRI_WILDCARD_STAR}}
+    end.
+
+%% -------------------------------------------------------------------
 %% delete_transient().
 %% -------------------------------------------------------------------
 
@@ -1359,5 +1396,7 @@ list_with_possible_retry_in_khepri(Fun) ->
 khepri_queue_path(#resource{virtual_host = VHost, name = Name}) ->
     khepri_queue_path(VHost, Name).
 
-khepri_queue_path(VHost, Name) when ?IS_KHEPRI_PATH_CONDITION(Name) ->
-    rabbit_db_vhost:khepri_vhost_path(VHost) ++ [queues, Name].
+khepri_queue_path(VHost, Name)
+  when ?IS_KHEPRI_PATH_CONDITION(VHost) andalso
+       ?IS_KHEPRI_PATH_CONDITION(Name) ->
+    ?RABBITMQ_KHEPRI_QUEUE_PATH(VHost, Name).

@@ -17,6 +17,9 @@ init_keycloak() {
   print "> KEYCLOAK_CONFIG_DIR: ${KEYCLOAK_CONFIG_DIR}"
   print "> KEYCLOAK_URL: ${KEYCLOAK_URL}"
   print "> KEYCLOAK_DOCKER_IMAGE: ${KEYCLOAK_DOCKER_IMAGE}"
+
+  generate-ca-server-client-kpi keycloak $KEYCLOAK_CONFIG_DIR
+
 }
 start_keycloak() {
   begin "Starting keycloak ..."
@@ -39,12 +42,12 @@ start_keycloak() {
     --publish 8443:8443 \
 		--env KEYCLOAK_ADMIN=admin \
 		--env KEYCLOAK_ADMIN_PASSWORD=admin \
-		--mount type=bind,source=${MOUNT_KEYCLOAK_CONF_DIR},target=/opt/keycloak/data/import/ \
+		-v ${MOUNT_KEYCLOAK_CONF_DIR}:/opt/keycloak/data/import/ \
 		${KEYCLOAK_DOCKER_IMAGE} start-dev --import-realm \
     --https-certificate-file=/opt/keycloak/data/import/server_keycloak_certificate.pem \
     --https-certificate-key-file=/opt/keycloak/data/import/server_keycloak_key.pem
 
-  wait_for_oidc_endpoint keycloak $KEYCLOAK_URL $MOUNT_KEYCLOAK_CONF_DIR/ca_certificate.pem
+  wait_for_oidc_endpoint keycloak $KEYCLOAK_URL $MOUNT_KEYCLOAK_CONF_DIR/ca_keycloak_certificate.pem
   end "Keycloak is ready"
 
   print " Note: If you modify keycloak configuration. Make sure to run the following command to export the configuration."

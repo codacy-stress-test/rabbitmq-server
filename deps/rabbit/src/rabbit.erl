@@ -38,7 +38,7 @@
 
 %%---------------------------------------------------------------------------
 %% Boot steps.
--export([maybe_insert_default_data/0, boot_delegate/0, recover/0,
+-export([update_cluster_tags/0, maybe_insert_default_data/0, boot_delegate/0, recover/0,
          pg_local_amqp_session/0,
          pg_local_amqp_connection/0]).
 
@@ -207,6 +207,12 @@
                     {mfa,         {?MODULE, maybe_insert_default_data, []}},
                     {requires,    recovery},
                     {enables,     routing_ready}]}).
+
+
+-rabbit_boot_step({cluster_tags,
+                   [{description, "Set cluster tags"},
+                    {mfa,         {?MODULE, update_cluster_tags, []}},
+                    {requires,    core_initialized}]}).
 
 -rabbit_boot_step({routing_ready,
                    [{description, "message delivery logic ready"},
@@ -735,6 +741,7 @@ status() ->
           {erlang_version,       erlang:system_info(system_version)},
           {memory,               rabbit_vm:memory()},
           {alarms,               alarms()},
+          {tags,                 tags()},
           {is_under_maintenance, rabbit_maintenance:is_being_drained_local_read(node())},
           {listeners,            listeners()},
           {vm_memory_calculation_strategy, vm_memory_monitor:get_memory_calculation_strategy()}],
@@ -793,6 +800,9 @@ alarms() ->
     N = node(),
     %% [{{resource_limit,memory,rabbit@mercurio},[]}]
     [{resource_limit, Limit, Node} || {{resource_limit, Limit, Node}, _} <- Alarms, Node =:= N].
+
+tags() ->
+    application:get_env(rabbit, node_tags, []).
 
 listeners() ->
     Listeners = try
@@ -1137,6 +1147,15 @@ pg_local_amqp_connection() ->
 
 pg_local_scope(Prefix) ->
     list_to_atom(io_lib:format("~s_~s", [Prefix, node()])).
+
+
+-spec update_cluster_tags() -> 'ok'.
+
+update_cluster_tags() ->
+    Tags = application:get_env(rabbit, cluster_tags, []),
+    ?LOG_DEBUG("Seeding cluster tags from application environment key...",
+                       #{domain => ?RMQLOG_DOMAIN_GLOBAL}),
+    rabbit_runtime_parameters:set_global(cluster_tags, Tags, <<"internal_user">>).
 
 -spec maybe_insert_default_data() -> 'ok'.
 

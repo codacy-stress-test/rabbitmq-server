@@ -441,6 +441,25 @@
 ## to make it easier for (human) operators to tell one cluster from another.
 # cluster_name = dev3.eng.megacorp.local
 
+## Optional key-value pairs that tag (label) the cluster.
+## They will be reported by CLI tools, by the HTTP API at 'GET /api/overview',
+## and potentially in other contexts.
+
+# cluster_tags.region = us-east-1
+# cluster_tags.zone = us-east-1d
+# cluster_tags.project = an-iot-thing
+
+# cluster_tags.role = mqtt-ingress
+# cluster_tags.environment = staging
+
+## A similar set of key-value pairs can be used to tag (label)
+## the specific node that will use this configuration file.
+
+# node_tags.uuid = '88CD083F-E211-479B-814A-6DA42FE78AF3'
+# node_tags.role = mqtt-ingress
+# node_tags.environment = staging
+
+
 ## Selects the default strategy used to pick a node to place a new queue leader replica
 ## on. Can be overridden by the `x-queue-leader-locator` optional queue argument
 ## at declaration time.
@@ -668,6 +687,10 @@
 ## Log all requests to the management HTTP API to a file.
 ##
 # management.http_log_dir = /path/to/access.log
+
+## Limits maximum accepted HTTP request body size to 500 KiB.
+## The default is 20 MiB.
+# management.http.max_body_size = 500000
 
 ## HTTP listener and embedded Web server settings.
 # ## See https://www.rabbitmq.com/docs/management for details.

@@ -78,6 +78,7 @@ run_setup_steps(Config, ExtraSteps) ->
             [
                 fun init_skip_as_error_flag/1,
                 fun guess_tested_erlang_app_name/1,
+                fun ensure_secondary_dist/1,
                 fun ensure_secondary_umbrella/1,
                 fun ensure_current_srcdir/1,
                 fun ensure_rabbitmq_ct_helpers_srcdir/1,
@@ -200,6 +201,18 @@ guess_tested_erlang_app_name(Config) ->
             AppName = string:strip(AppName0, left, $.),
             set_config(Config, {tested_erlang_app, list_to_atom(AppName)})
     end.
+
+ensure_secondary_dist(Config) ->
+    Path = case get_config(Config, secondary_dist) of
+               undefined -> os:getenv("SECONDARY_DIST");
+               P         -> P
+           end,
+    %% Hard fail if the path is invalid.
+    case Path =:= false orelse filelib:is_dir(Path) of
+        true -> ok;
+        false -> error(secondary_dist_path_invalid)
+    end,
+    set_config(Config, {secondary_dist, Path}).
 
 ensure_secondary_umbrella(Config) ->
     Path = case get_config(Config, secondary_umbrella) of
@@ -584,9 +597,14 @@ ensure_rabbitmq_queues_cmd(Config) ->
 
 ensure_ssl_certs(Config) ->
     SrcDir = ?config(rabbitmq_ct_helpers_srcdir, Config),
+    UniqueDir = io_lib:format(
+                  "~s2-~p",
+                  [node(), erlang:unique_integer([positive,monotonic])]),
     CertsMakeDir = filename:join([SrcDir, "tools", "tls-certs"]),
     PrivDir = ?config(priv_dir, Config),
-    CertsDir = filename:join(PrivDir, "certs"),
+    CertsDir = filename:join([PrivDir, UniqueDir, "certs"]),
+    _ = filelib:ensure_dir(CertsDir),
+    _ = file:make_dir(CertsDir),
     CertsPwd = proplists:get_value(rmq_certspwd, Config, ?SSL_CERT_PASSWORD),
     Cmd = [
       "PASSWORD=" ++ CertsPwd,
@@ -1060,11 +1078,13 @@ convert_to_unicode_binary(Arg) when is_binary(Arg) ->
     Arg.
 
 is_mixed_versions() ->
-    os:getenv("SECONDARY_UMBRELLA") =/= false
+    os:getenv("SECONDARY_DIST") =/= false
+        orelse os:getenv("SECONDARY_UMBRELLA") =/= false
         orelse os:getenv("RABBITMQ_RUN_SECONDARY") =/= false.
 
 is_mixed_versions(Config) ->
-    get_config(Config, secondary_umbrella, false) =/= false
+    get_config(Config, secondary_dist, false) =/= false
+        orelse get_config(Config, secondary_umbrella, false) =/= false
         orelse get_config(Config, rabbitmq_run_secondary_cmd, false) =/= false.
 
 %% -------------------------------------------------------------------

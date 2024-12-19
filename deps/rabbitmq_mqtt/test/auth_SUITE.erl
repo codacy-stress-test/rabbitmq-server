@@ -72,6 +72,12 @@ sub_groups() ->
        [client_id_from_cert_san_dns,
         invalid_client_id_from_cert_san_dns
        ]},
+     {ssl_user_with_client_id_in_cert_san_dns_1, [], 
+       [client_id_from_cert_san_dns_1        
+       ]},
+     {ssl_user_with_client_id_in_cert_san_email, [], 
+       [client_id_from_cert_san_email     
+       ]},            
      {ssl_user_with_client_id_in_cert_dn, [], 
        [client_id_from_cert_dn
        ]},  
@@ -205,7 +211,18 @@ mqtt_config(ssl_user_with_client_id_in_cert_san_dns) ->
     {rabbitmq_mqtt, [{ssl_cert_login,  true},
                      {allow_anonymous, false}, 
                      {ssl_cert_client_id_from, subject_alternative_name},
-                     {ssl_cert_client_id_san_type, dns}]};
+                     {ssl_cert_login_san_type, dns}]};
+mqtt_config(ssl_user_with_client_id_in_cert_san_dns_1) ->
+    {rabbitmq_mqtt, [{ssl_cert_login,  true},
+                     {allow_anonymous, false}, 
+                     {ssl_cert_client_id_from, subject_alternative_name},
+                     {ssl_cert_login_san_type, dns},
+                     {ssl_cert_login_san_index, 1}]}; 
+mqtt_config(ssl_user_with_client_id_in_cert_san_email) ->
+    {rabbitmq_mqtt, [{ssl_cert_login,  true},
+                     {allow_anonymous, false}, 
+                     {ssl_cert_client_id_from, subject_alternative_name},
+                     {ssl_cert_login_san_type, email}]};                                       
 mqtt_config(ssl_user_with_client_id_in_cert_dn) ->
     {rabbitmq_mqtt, [{ssl_cert_login,  true},
                      {allow_anonymous, false}, 
@@ -216,6 +233,8 @@ mqtt_config(_) ->
 
 auth_config(T) when T == client_id_propagation; 
                     T == ssl_user_with_client_id_in_cert_san_dns;
+                    T == ssl_user_with_client_id_in_cert_san_dns_1;
+                    T == ssl_user_with_client_id_in_cert_san_email;
                     T == ssl_user_with_client_id_in_cert_dn ->
     {rabbit, [
             {auth_backends, [rabbit_auth_backend_mqtt_mock]}
@@ -316,6 +335,8 @@ init_per_testcase(T, Config)
   when T =:= client_id_propagation;
        T =:= invalid_client_id_from_cert_san_dns;
        T =:= client_id_from_cert_san_dns;
+       T =:= client_id_from_cert_san_dns_1;
+       T =:= client_id_from_cert_san_email;
        T =:= client_id_from_cert_dn ->
     SetupProcess = setup_rabbit_auth_backend_mqtt_mock(Config),
     rabbit_ct_helpers:set_config(Config, {mock_setup_process, SetupProcess});
@@ -372,6 +393,7 @@ end_per_testcase(Testcase, Config) when Testcase == ssl_user_auth_success;
                                         Testcase == ssl_user_auth_failure;
                                         Testcase == ssl_user_vhost_not_allowed ->
     delete_cert_user(Config),
+    close_all_connections(Config),
     rabbit_ct_helpers:testcase_finished(Config, Testcase);
 end_per_testcase(TestCase, Config) when TestCase == ssl_user_vhost_parameter_mapping_success;
                                         TestCase == ssl_user_vhost_parameter_mapping_not_allowed ->
@@ -379,14 +401,17 @@ end_per_testcase(TestCase, Config) when TestCase == ssl_user_vhost_parameter_map
     VhostForCertUser = ?config(temp_vhost_for_ssl_user, Config),
     ok = rabbit_ct_broker_helpers:delete_vhost(Config, VhostForCertUser),
     ok = rabbit_ct_broker_helpers:clear_global_parameter(Config, mqtt_default_vhosts),
+    close_all_connections(Config),
     rabbit_ct_helpers:testcase_finished(Config, TestCase);
 end_per_testcase(user_credentials_auth, Config) ->
     User = ?config(new_user, Config),
     {ok,_} = rabbit_ct_broker_helpers:rabbitmqctl(Config, 0, ["delete_user", User]),
+    close_all_connections(Config),
     rabbit_ct_helpers:testcase_finished(Config, user_credentials_auth);
 end_per_testcase(ssl_user_vhost_parameter_mapping_vhost_does_not_exist, Config) ->
     delete_cert_user(Config),
     ok = rabbit_ct_broker_helpers:clear_global_parameter(Config, mqtt_default_vhosts),
+    close_all_connections(Config),
     rabbit_ct_helpers:testcase_finished(Config, ssl_user_vhost_parameter_mapping_vhost_does_not_exist);
 end_per_testcase(Testcase, Config) when Testcase == port_vhost_mapping_success;
                                         Testcase == port_vhost_mapping_not_allowed;
@@ -396,11 +421,13 @@ end_per_testcase(Testcase, Config) when Testcase == port_vhost_mapping_success;
     VHost = ?config(temp_vhost_for_port_mapping, Config),
     ok = rabbit_ct_broker_helpers:delete_vhost(Config, VHost),
     ok = rabbit_ct_broker_helpers:clear_global_parameter(Config, mqtt_port_to_vhost_mapping),
+    close_all_connections(Config),
     rabbit_ct_helpers:testcase_finished(Config, Testcase);
 end_per_testcase(T = port_vhost_mapping_vhost_does_not_exist, Config) ->
     User = <<"guest">>,
     ok = set_full_permissions(Config, User, <<"/">>),
     ok = rabbit_ct_broker_helpers:clear_global_parameter(Config, mqtt_port_to_vhost_mapping),
+    close_all_connections(Config),
     rabbit_ct_helpers:testcase_finished(Config, T);
 end_per_testcase(T = ssl_user_cert_vhost_mapping_takes_precedence_over_port_vhost_mapping, Config) ->
     delete_cert_user(Config),
@@ -411,6 +438,7 @@ end_per_testcase(T = ssl_user_cert_vhost_mapping_takes_precedence_over_port_vhos
     VHostForPortVHostMapping = ?config(temp_vhost_for_port_mapping, Config),
     ok = rabbit_ct_broker_helpers:delete_vhost(Config, VHostForPortVHostMapping),
     ok = rabbit_ct_broker_helpers:clear_global_parameter(Config, mqtt_port_to_vhost_mapping),
+    close_all_connections(Config),
     rabbit_ct_helpers:testcase_finished(Config, T);
 end_per_testcase(T, Config) when T == queue_bind_permission;
                                  T == queue_unbind_permission;
@@ -438,18 +466,28 @@ end_per_testcase(T, Config) when T == queue_bind_permission;
     %% And provide an empty log file for the next test in this group
     file:write_file(?config(log_location, Config), <<>>),
 
+    close_all_connections(Config),
+
     rabbit_ct_helpers:testcase_finished(Config, T);
 
 end_per_testcase(T, Config) 
    when T =:= client_id_propagation;
        T =:= invalid_client_id_from_cert_san_dns;
        T =:= client_id_from_cert_san_dns;
+       T =:= client_id_from_cert_san_dns_1;
+       T =:= client_id_from_cert_san_email;
        T =:= client_id_from_cert_dn ->
     SetupProcess = ?config(mock_setup_process, Config),
-    SetupProcess ! stop;
+    SetupProcess ! stop,
+    close_all_connections(Config);
     
 end_per_testcase(Testcase, Config) ->
+    close_all_connections(Config),
     rabbit_ct_helpers:testcase_finished(Config, Testcase).
+
+close_all_connections(Config) ->
+    rpc(Config, 0, rabbit_mqtt, close_local_client_connections,
+        [end_per_testcase]).
 
 delete_cert_user(Config) ->
     User = ?config(temp_ssl_user, Config),
@@ -500,7 +538,31 @@ user_credentials_auth(Config) ->
         Config).
 
 client_id_from_cert_san_dns(Config) ->    
-    ExpectedClientId = <<"rabbit_client_id">>, % Found in the client's certificate as SAN type CLIENT_ID 
+    ExpectedClientId = <<"rabbit_client_id">>, % Found in the client's certificate as SAN type DNS 
+    MqttClientId = ExpectedClientId,
+    {ok, C} = connect_ssl(MqttClientId, Config),
+    {ok, _} = emqtt:connect(C),
+    [{authentication, AuthProps}] = rpc(Config, 0,
+                                        rabbit_auth_backend_mqtt_mock,
+                                        get,
+                                        [authentication]),
+    ?assertEqual(ExpectedClientId, proplists:get_value(client_id, AuthProps)),
+    ok = emqtt:disconnect(C).
+
+client_id_from_cert_san_dns_1(Config) ->    
+    ExpectedClientId = <<"rabbit_client_id_ext">>, % Found in the client's certificate as SAN type DNS
+    MqttClientId = ExpectedClientId,
+    {ok, C} = connect_ssl(MqttClientId, Config),
+    {ok, _} = emqtt:connect(C),
+    [{authentication, AuthProps}] = rpc(Config, 0,
+                                        rabbit_auth_backend_mqtt_mock,
+                                        get,
+                                        [authentication]),
+    ?assertEqual(ExpectedClientId, proplists:get_value(client_id, AuthProps)),
+    ok = emqtt:disconnect(C).
+
+client_id_from_cert_san_email(Config) ->    
+    ExpectedClientId = <<"rabbit_client@localhost">>, % Found in the client's certificate as SAN type email
     MqttClientId = ExpectedClientId,
     {ok, C} = connect_ssl(MqttClientId, Config),
     {ok, _} = emqtt:connect(C),
@@ -610,7 +672,7 @@ setup_rabbit_auth_backend_mqtt_mock(Config) ->
     receive
         {ok, SP} -> SP
     after
-        3000 -> ct:fail("timeout waiting for rabbit_auth_backend_mqtt_mock:setup/1")
+        30_000 -> ct:fail("timeout waiting for rabbit_auth_backend_mqtt_mock:setup/1")
     end.
 
 client_id_propagation(Config) ->
@@ -1271,6 +1333,6 @@ assert_connection_closed(ClientPid) ->
         {'EXIT', ClientPid, {shutdown, tcp_closed}} ->
             ok
     after
-        2000 ->
+        30_000 ->
             ct:fail("timed out waiting for exit message")
     end.

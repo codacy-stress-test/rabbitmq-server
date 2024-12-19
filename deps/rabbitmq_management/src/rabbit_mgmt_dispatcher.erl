@@ -132,6 +132,7 @@ dispatcher() ->
      {"/connections/:connection",                              rabbit_mgmt_wm_connection, []},
      {"/connections/username/:username",                       rabbit_mgmt_wm_connection_user_name, []},
      {"/connections/:connection/channels",                     rabbit_mgmt_wm_connection_channels, []},
+     {"/connections/:connection/sessions",                     rabbit_mgmt_wm_connection_sessions, []},
      {"/channels",                                             rabbit_mgmt_wm_channels, []},
      {"/channels/:channel",                                    rabbit_mgmt_wm_channel, []},
      {"/consumers",                                            rabbit_mgmt_wm_consumers, []},
@@ -207,5 +208,6 @@ dispatcher() ->
      {"/auth/attempts/:node/source",                           rabbit_mgmt_wm_auth_attempts, [by_source]},
      {"/login",                                                rabbit_mgmt_wm_login, []},
      {"/config/effective",                                     rabbit_mgmt_wm_environment, []},
-     {"/auth/hash_password/:password",                         rabbit_mgmt_wm_hash_password, []}
+     {"/auth/hash_password/:password",                         rabbit_mgmt_wm_hash_password, []},
+     {"/version",                                              rabbit_mgmt_wm_version, []}
     ].

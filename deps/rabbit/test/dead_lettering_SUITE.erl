@@ -17,6 +17,8 @@
 
 -import(queue_utils, [wait_for_messages/2]).
 
+-define(TIMEOUT, 30_000).
+
 all() ->
     [
      {group, tests}
@@ -455,7 +457,7 @@ dead_letter_reject_many(Config) ->
     [begin
          receive {#'basic.deliver'{consumer_tag = CTag, delivery_tag = DTag}, #amqp_msg{payload = P}} ->
                      amqp_channel:cast(Ch, #'basic.reject'{delivery_tag = DTag, requeue = false})
-         after 5000 ->
+         after ?TIMEOUT ->
                    amqp_channel:call(Ch, #'basic.cancel'{consumer_tag = CTag}),
                    exit(timeout)
          end
@@ -628,7 +630,7 @@ dead_letter_nack_requeue_nack_norequeue_basic_consume(Config) ->
                                             consumer_tag = Ctag1},
                            self()),
     receive #'basic.consume_ok'{consumer_tag = Ctag1} -> ok
-    after 5000 -> ct:fail({missing_event, ?LINE})
+    after ?TIMEOUT -> ct:fail({missing_event, ?LINE})
     end,
 
     Ctag2 = <<"ctag 2">>,
@@ -637,20 +639,20 @@ dead_letter_nack_requeue_nack_norequeue_basic_consume(Config) ->
                                             consumer_tag = Ctag2},
                            self()),
     receive #'basic.consume_ok'{consumer_tag = Ctag2} -> ok
-    after 5000 -> ct:fail({missing_event, ?LINE})
+    after ?TIMEOUT -> ct:fail({missing_event, ?LINE})
     end,
 
     receive {#'basic.deliver'{},
              #amqp_msg{payload = <<"m1">>}} -> ok
-    after 5000 -> ct:fail({missing_event, ?LINE})
+    after ?TIMEOUT -> ct:fail({missing_event, ?LINE})
     end,
     D2 = receive {#'basic.deliver'{delivery_tag = Del2},
                   #amqp_msg{payload = <<"m2">>}} -> Del2
-         after 5000 -> ct:fail({missing_event, ?LINE})
+         after ?TIMEOUT -> ct:fail({missing_event, ?LINE})
          end,
     receive {#'basic.deliver'{},
              #amqp_msg{payload = <<"m3">>}} -> ok
-    after 5000 -> ct:fail({missing_event, ?LINE})
+    after ?TIMEOUT -> ct:fail({missing_event, ?LINE})
     end,
     wait_for_messages(Config, [[QName, <<"3">>, <<"0">>, <<"3">>]]),
 
@@ -663,13 +665,13 @@ dead_letter_nack_requeue_nack_norequeue_basic_consume(Config) ->
     receive {#'basic.deliver'{},
              #amqp_msg{payload = P1a}} ->
                 ?assertEqual(<<"m1">>, P1a)
-    after 5000 -> ct:fail({missing_event, ?LINE})
+    after ?TIMEOUT -> ct:fail({missing_event, ?LINE})
     end,
     D5 = receive {#'basic.deliver'{delivery_tag = Del5},
                   #amqp_msg{payload = P2a}} ->
                      ?assertEqual(<<"m2">>, P2a),
                      Del5
-         after 5000 -> ct:fail({missing_event, ?LINE})
+         after ?TIMEOUT -> ct:fail({missing_event, ?LINE})
          end,
 
     %% Nack all 3 without requeue
@@ -681,18 +683,18 @@ dead_letter_nack_requeue_nack_norequeue_basic_consume(Config) ->
     receive {#'basic.deliver'{},
              #amqp_msg{payload = P3b}} ->
                 ?assertEqual(<<"m3">>, P3b)
-    after 5000 -> ct:fail({missing_event, ?LINE})
+    after ?TIMEOUT -> ct:fail({missing_event, ?LINE})
     end,
     receive {#'basic.deliver'{},
              #amqp_msg{payload = P1b}} ->
                 ?assertEqual(<<"m1">>, P1b)
-    after 5000 -> ct:fail({missing_event, ?LINE})
+    after ?TIMEOUT -> ct:fail({missing_event, ?LINE})
     end,
     LastD = receive {#'basic.deliver'{delivery_tag = LastDel},
                      #amqp_msg{payload = P2b}} ->
                         ?assertEqual(<<"m2">>, P2b),
                         LastDel
-            after 5000 -> ct:fail({missing_event, ?LINE})
+            after ?TIMEOUT -> ct:fail({missing_event, ?LINE})
             end,
     wait_for_messages(Config, [[DLXQName, <<"3">>, <<"0">>, <<"3">>]]),
 
@@ -1327,7 +1329,8 @@ dead_letter_headers_should_be_appended_for_each_event(Config) ->
 
 dead_letter_headers_should_not_be_appended_for_republish(Config) ->
     %% here we (re-)publish a message with the DL headers already set
-    {Conn, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+    {Conn0, Ch0} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+    {Conn1, Ch1} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 1),
     Args = ?config(queue_args, Config),
     Durable = ?config(queue_durable, Config),
     QName = ?config(queue_name, Config),
@@ -1335,44 +1338,45 @@ dead_letter_headers_should_not_be_appended_for_republish(Config) ->
 
     DeadLetterArgs = [{<<"x-dead-letter-exchange">>, longstr, <<>>},
                       {<<"x-dead-letter-routing-key">>, longstr, DlxName}],
-    #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = QName, arguments = DeadLetterArgs ++ Args, durable = Durable}),
-    #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = DlxName, arguments = Args, durable = Durable}),
+    #'queue.declare_ok'{} = amqp_channel:call(Ch0, #'queue.declare'{queue = QName, arguments = DeadLetterArgs ++ Args, durable = Durable}),
+    #'queue.declare_ok'{} = amqp_channel:call(Ch0, #'queue.declare'{queue = DlxName, arguments = Args, durable = Durable}),
 
     P = <<"msg1">>,
 
     %% Publish message
-    publish(Ch, QName, [P]),
+    publish(Ch0, QName, [P]),
     wait_for_messages(Config, [[QName, <<"1">>, <<"1">>, <<"0">>]]),
-    [DTag] = consume(Ch, QName, [P]),
+    [DTag] = consume(Ch0, QName, [P]),
     wait_for_messages(Config, [[QName, <<"1">>, <<"0">>, <<"1">>]]),
-    amqp_channel:cast(Ch, #'basic.nack'{delivery_tag = DTag,
-                                        multiple     = false,
-                                        requeue      = false}),
+    amqp_channel:cast(Ch0, #'basic.nack'{delivery_tag = DTag,
+                                         multiple     = false,
+                                         requeue      = false}),
     wait_for_messages(Config, [[DlxName, <<"1">>, <<"1">>, <<"0">>]]),
     {#'basic.get_ok'{delivery_tag = DTag1}, #amqp_msg{payload = P,
                                                       props = #'P_basic'{headers = Headers1}}} =
-        amqp_channel:call(Ch, #'basic.get'{queue = DlxName}),
+        amqp_channel:call(Ch0, #'basic.get'{queue = DlxName}),
     {array, [{table, Death1}]} = rabbit_misc:table_lookup(Headers1, <<"x-death">>),
     ?assertEqual({longstr, <<"rejected">>}, rabbit_misc:table_lookup(Death1, <<"reason">>)),
 
-    amqp_channel:cast(Ch, #'basic.ack'{delivery_tag = DTag1}),
+    amqp_channel:cast(Ch0, #'basic.ack'{delivery_tag = DTag1}),
 
     wait_for_messages(Config, [[DlxName, <<"0">>, <<"0">>, <<"0">>]]),
 
-    #'queue.delete_ok'{} = amqp_channel:call(Ch, #'queue.delete'{queue = QName}),
+    #'queue.delete_ok'{} = amqp_channel:call(Ch0, #'queue.delete'{queue = QName}),
     DeadLetterArgs1 = DeadLetterArgs ++ [{<<"x-message-ttl">>, long, 1}],
-    #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{queue = QName, arguments = DeadLetterArgs1 ++ Args, durable = Durable}),
+    #'queue.declare_ok'{} = amqp_channel:call(Ch0, #'queue.declare'{queue = QName, arguments = DeadLetterArgs1 ++ Args, durable = Durable}),
 
-    publish(Ch, QName, [P], Headers1),
+    publish(Ch1, QName, [P], Headers1),
 
     wait_for_messages(Config, [[DlxName, <<"1">>, <<"1">>, <<"0">>]]),
     {#'basic.get_ok'{}, #amqp_msg{payload = P,
                                   props = #'P_basic'{headers = Headers2}}} =
-        amqp_channel:call(Ch, #'basic.get'{queue = DlxName}),
+        amqp_channel:call(Ch0, #'basic.get'{queue = DlxName}),
 
     {array, [{table, Death2}]} = rabbit_misc:table_lookup(Headers2, <<"x-death">>),
     ?assertEqual({longstr, <<"expired">>}, rabbit_misc:table_lookup(Death2, <<"reason">>)),
-    ok = rabbit_ct_client_helpers:close_connection(Conn).
+    ok = rabbit_ct_client_helpers:close_connection(Conn0),
+    ok = rabbit_ct_client_helpers:close_connection(Conn1).
 
 %% Dead-lettering a message modifies its headers:
 %% the exchange name is replaced with that of the latest dead-letter exchange,
@@ -1726,7 +1730,7 @@ metric_rejected(Config) ->
     [begin
          receive {#'basic.deliver'{consumer_tag = CTag, delivery_tag = DTag}, #amqp_msg{payload = P}} ->
                      amqp_channel:cast(Ch, #'basic.reject'{delivery_tag = DTag, requeue = false})
-         after 5000 ->
+         after ?TIMEOUT ->
                    amqp_channel:call(Ch, #'basic.cancel'{consumer_tag = CTag}),
                    exit(timeout)
          end
@@ -1811,7 +1815,7 @@ stream(Config) ->
       self()),
     receive
         #'basic.consume_ok'{consumer_tag = Ctag} -> ok
-    after 5000 -> ct:fail({missing_event, ?LINE})
+    after ?TIMEOUT -> ct:fail({missing_event, ?LINE})
     end,
 
     Headers = receive {#'basic.deliver'{delivery_tag = DeliveryTag},

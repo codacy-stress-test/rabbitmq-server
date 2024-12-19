@@ -6,7 +6,13 @@ This document explains who is eligible for community support for open source Rab
 ### What is Community Support?
 
 Community support is defined as all questions, root cause analysis requests, issue reports, and other interactions the RabbitMQ core team has with open source RabbitMQ users on GitHub
-and our community forums. 
+and our community forums.
+
+### How is Community Support Related to Patch Releases?
+
+Being covered by community support for a release series also means that patch releases, general and security-related ones,
+are produced regularly and are available publicly. Patch releases, even if produced, **will not be made available to non-paying users** for series out of community support, with potential
+exception for very high severity CVEs.
 
 ### What is Broadcom's Obligation to Reply to Messages or Issues Reported?
 
@@ -60,11 +66,11 @@ The above rules equally apply to contributions to RabbitMQ, officially supported
 
 ## Release Series Eligible for Community Support
 
-Only releases in the latest minor series of the latest major version are eligible for community support. Currently this is RabbitMQ 3.13.x in the 3.x major series.
+Only releases in the latest minor series of the latest major version are eligible for community support. Currently this is RabbitMQ 4.0.x in the 4.x major series.
 
 All patches (bug fixes and improvements alike) will only be available for the latest minor series in the latest major series. This applies to all changes contributed by the community.
 
-For example, if the latest supported series (minor) is 3.13.x, all core and community contributions will ship in a 3.13.x release until a newer minor or major comes out (say, 3.14.x or 4.0.x). 
+For example, if the latest supported series (minor) is 4.0.x, all core and community contributions will ship in a 4.0.x release until a newer minor or major comes out (say, 4.1.x). 
 
-The RabbitMQ team will not backport patches to older release series (such as 3.12.x) of open source RabbitMQ, including cases where a patch was contributed by the community.
+The RabbitMQ team will not backport patches to older release series (such as 3.13.x) of open source RabbitMQ, including cases where a patch was contributed by the community.
 Patch releases for older release series are exclusively available to users with VMware Tanzu RabbitMQ commercial licenses.
